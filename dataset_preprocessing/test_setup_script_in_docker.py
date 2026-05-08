@@ -14,6 +14,7 @@ Usage:
     python dataset_preprocessing/test_setup_script_in_docker.py \\
         --instance-id <iid> --base-image python:3.11-slim
 """
+
 import argparse
 import re
 import shutil
@@ -40,21 +41,35 @@ DEFAULT_IMAGE = "ubuntu:24.04"
 def extract_base_commit(setup_script: str) -> str:
     m = re.search(r"git reset --hard ([0-9a-f]{40})", setup_script)
     if not m:
-        raise RuntimeError("Could not find a `git reset --hard <sha>` in the generated script")
+        raise RuntimeError(
+            "Could not find a `git reset --hard <sha>` in the generated script"
+        )
     return m.group(1)
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--instance-id", default=DEFAULT_INSTANCE)
-    p.add_argument("--base-image", default=DEFAULT_IMAGE,
-                   help="Container image to run the setup script in.")
-    p.add_argument("--skip-apt", action="store_true",
-                   help="Pass through to the converter (use if the base image already has system tools).")
-    p.add_argument("--no-date-pin", action="store_true",
-                   help="Pass through to the converter.")
-    p.add_argument("--keep-workspace", action="store_true",
-                   help="Don't delete the temporary workspace on exit (useful for debugging).")
+    p.add_argument(
+        "--base-image",
+        default=DEFAULT_IMAGE,
+        help="Container image to run the setup script in.",
+    )
+    p.add_argument(
+        "--skip-apt",
+        action="store_true",
+        help="Pass through to the converter (use if the base image already has system tools).",
+    )
+    p.add_argument(
+        "--no-date-pin", action="store_true", help="Pass through to the converter."
+    )
+    p.add_argument(
+        "--keep-workspace",
+        action="store_true",
+        help="Don't delete the temporary workspace on exit (useful for debugging).",
+    )
     args = p.parse_args()
 
     if shutil.which("docker") is None:
@@ -67,7 +82,9 @@ def main() -> int:
         return 2
 
     setup = build_sections(
-        args.instance_id, base, instance,
+        args.instance_id,
+        base,
+        instance,
         no_date_pin=args.no_date_pin,
     ).to_bash(skip_apt=args.skip_apt)
     expected_commit = extract_base_commit(setup)
@@ -83,20 +100,24 @@ def main() -> int:
             "set -e\n"
             "bash /workspace/setup.sh\n"
             f'EXPECTED="{expected_commit}"\n'
-            'ACTUAL=$(git -C /app rev-parse HEAD)\n'
+            "ACTUAL=$(git -C /app rev-parse HEAD)\n"
             'if [ "$EXPECTED" != "$ACTUAL" ]; then\n'
             '  echo "FAIL: /app HEAD is $ACTUAL, expected $EXPECTED" >&2\n'
-            '  exit 1\n'
-            'fi\n'
+            "  exit 1\n"
+            "fi\n"
             'echo "OK: /app HEAD = $ACTUAL"\n'
         )
         (workspace / "driver.sh").write_text(driver)
 
         cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{workspace}:/workspace",
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{workspace}:/workspace",
             args.base_image,
-            "bash", "/workspace/driver.sh",
+            "bash",
+            "/workspace/driver.sh",
         ]
         print(f"Running: {' '.join(cmd)}", flush=True)
         rc = subprocess.call(cmd)
@@ -105,7 +126,10 @@ def main() -> int:
         else:
             print(f"FAIL: container exited with code {rc}", file=sys.stderr)
             if not args.keep_workspace:
-                print("  (rerun with --keep-workspace to inspect the workspace)", file=sys.stderr)
+                print(
+                    "  (rerun with --keep-workspace to inspect the workspace)",
+                    file=sys.stderr,
+                )
         return rc
     finally:
         if args.keep_workspace:

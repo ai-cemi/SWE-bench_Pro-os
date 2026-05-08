@@ -17,6 +17,7 @@ Usage:
     gen_bash_script_setup.py --all-python --output-dir scripts/
     gen_bash_script_setup.py --list-python
 """
+
 import argparse
 import sys
 from pathlib import Path
@@ -37,7 +38,9 @@ def _generate_one(iid: str, args) -> str | None:
     if not is_python_dockerfile(base):
         return None
     sections = build_sections(iid, base, inst, no_date_pin=args.no_date_pin)
-    return sections.to_bash(skip_apt=args.skip_apt, skip_repo_setup=args.skip_repo_setup)
+    return sections.to_bash(
+        skip_apt=args.skip_apt, skip_repo_setup=args.skip_repo_setup
+    )
 
 
 def cmd_list_python(_args) -> int:
@@ -49,7 +52,10 @@ def cmd_list_python(_args) -> int:
 def cmd_convert_one(args) -> int:
     script = _generate_one(args.instance_id, args)
     if script is None:
-        print(f"Warning: {args.instance_id} is not a Python instance (or Dockerfiles not found).", file=sys.stderr)
+        print(
+            f"Warning: {args.instance_id} is not a Python instance (or Dockerfiles not found).",
+            file=sys.stderr,
+        )
         return 1
     if args.output:
         Path(args.output).write_text(script)
@@ -66,7 +72,10 @@ def cmd_all_python(args) -> int:
     for iid in iter_python_instance_ids():
         script = _generate_one(iid, args)
         if script is None:
-            print(f"  [skip] {iid}: Dockerfiles not in local dockerfiles/", file=sys.stderr)
+            print(
+                f"  [skip] {iid}: Dockerfiles not in local dockerfiles/",
+                file=sys.stderr,
+            )
             continue
         (out_dir / f"{iid}.sh").write_text(script)
         n += 1
@@ -75,16 +84,36 @@ def cmd_all_python(args) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--instance-id", help="Convert a single instance.")
-    mode.add_argument("--all-python", action="store_true", help="Convert every Python instance from the HF dataset.")
-    mode.add_argument("--list-python", action="store_true", help="Print every Python instance_id from the HF dataset and exit.")
-    p.add_argument("--output", help="Output path (single-instance mode). Defaults to stdout.")
+    mode.add_argument(
+        "--all-python",
+        action="store_true",
+        help="Convert every Python instance from the HF dataset.",
+    )
+    mode.add_argument(
+        "--list-python",
+        action="store_true",
+        help="Print every Python instance_id from the HF dataset and exit.",
+    )
+    p.add_argument(
+        "--output", help="Output path (single-instance mode). Defaults to stdout."
+    )
     p.add_argument("--output-dir", help="Output directory (--all-python mode).")
     p.add_argument("--skip-apt", action="store_true", help="Omit the APT section.")
-    p.add_argument("--skip-repo-setup", action="store_true", help="Omit REPO + PREPROCESS sections.")
-    p.add_argument("--no-date-pin", action="store_true", help="Strip pypi-timemachine without adding UV_EXCLUDE_NEWER.")
+    p.add_argument(
+        "--skip-repo-setup",
+        action="store_true",
+        help="Omit REPO + PREPROCESS sections.",
+    )
+    p.add_argument(
+        "--no-date-pin",
+        action="store_true",
+        help="Strip pypi-timemachine without adding UV_EXCLUDE_NEWER.",
+    )
     args = p.parse_args()
     if args.all_python and not args.output_dir:
         p.error("--all-python requires --output-dir")

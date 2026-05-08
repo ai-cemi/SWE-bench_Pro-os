@@ -26,9 +26,9 @@ NEEDS_SPECIAL_REPO = {"google-chrome-stable"}
 
 # Ubuntu 24.04 package renames/removals (old name → new name, or None to drop)
 UBUNTU_24_RENAMES: dict[str, str | None] = {
-    "libasound2": "libasound2t64",   # t64 ABI transition
-    "libegl1-mesa": None,            # absorbed into libegl1
-    "libgl1-mesa-glx": None,         # absorbed into libgl1
+    "libasound2": "libasound2t64",  # t64 ABI transition
+    "libegl1-mesa": None,  # absorbed into libegl1
+    "libgl1-mesa-glx": None,  # absorbed into libgl1
 }
 
 SUPPORTED_LANGUAGES = {"python"}
@@ -59,7 +59,10 @@ def collect_by_repo(language: str) -> dict[str, set[str]]:
             continue
 
         if not is_python_dockerfile(base):
-            print(f"  [warn] non-Python base image, skipping (not yet supported): {iid}", file=sys.stderr)
+            print(
+                f"  [warn] non-Python base image, skipping (not yet supported): {iid}",
+                file=sys.stderr,
+            )
             skipped_non_python += 1
             continue
 
@@ -67,9 +70,15 @@ def collect_by_repo(language: str) -> dict[str, set[str]]:
         by_repo[row["repo"]].update(sections.apt_packages)
 
     if skipped_missing:
-        print(f"  [info] {skipped_missing} instances skipped (Dockerfiles not in local dockerfiles/)", file=sys.stderr)
+        print(
+            f"  [info] {skipped_missing} instances skipped (Dockerfiles not in local dockerfiles/)",
+            file=sys.stderr,
+        )
     if skipped_non_python:
-        print(f"  [info] {skipped_non_python} instances skipped (non-Python base image)", file=sys.stderr)
+        print(
+            f"  [info] {skipped_non_python} instances skipped (non-Python base image)",
+            file=sys.stderr,
+        )
 
     return dict(by_repo)
 
@@ -97,7 +106,9 @@ def render(by_repo: dict[str, set[str]]) -> str:
     seen: set[str] = set()
     deduped: list[tuple[str, list[str]]] = []
     for title, pkgs in sections:
-        unique = sorted(p for p in pkgs if p not in seen and p not in NEEDS_SPECIAL_REPO)
+        unique = sorted(
+            p for p in pkgs if p not in seen and p not in NEEDS_SPECIAL_REPO
+        )
         seen.update(unique)
         deduped.append((title, unique))
 
@@ -141,15 +152,26 @@ def render(by_repo: dict[str, set[str]]) -> str:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--language", default="python",
-                   help=f"Filter by repo_language (default: python). Supported: {', '.join(sorted(SUPPORTED_LANGUAGES))}")
-    p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
-                   help="Output path (default: install_system_deps.sh)")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--language",
+        default="python",
+        help=f"Filter by repo_language (default: python). Supported: {', '.join(sorted(SUPPORTED_LANGUAGES))}",
+    )
+    p.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help="Output path (default: install_system_deps.sh)",
+    )
     args = p.parse_args()
 
     if args.language not in SUPPORTED_LANGUAGES:
-        p.error(f"--language {args.language!r} is not yet supported. Supported: {', '.join(sorted(SUPPORTED_LANGUAGES))}")
+        p.error(
+            f"--language {args.language!r} is not yet supported. Supported: {', '.join(sorted(SUPPORTED_LANGUAGES))}"
+        )
 
     print(f"Scanning HF dataset for language={args.language!r} ...", flush=True)
     by_repo = collect_by_repo(args.language)

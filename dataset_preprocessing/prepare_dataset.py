@@ -11,6 +11,7 @@ Usage:
     python dataset_preprocessing/prepare_dataset.py --output artifacts/python_dataset.jsonl
     python dataset_preprocessing/prepare_dataset.py --output artifacts/python_dataset.jsonl --no-date-pin
 """
+
 import argparse
 import json
 import sys
@@ -54,9 +55,15 @@ python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspa
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--output", required=True, help="Output JSONL path.")
-    p.add_argument("--no-date-pin", action="store_true", help="Strip pypi-timemachine without adding UV_EXCLUDE_NEWER.")
+    p.add_argument(
+        "--no-date-pin",
+        action="store_true",
+        help="Strip pypi-timemachine without adding UV_EXCLUDE_NEWER.",
+    )
     args = p.parse_args()
 
     out = Path(args.output)
@@ -85,7 +92,9 @@ def main() -> int:
                 continue
             sections = build_sections(iid, base, inst, no_date_pin=args.no_date_pin)
             record = dict(row)
-            record["setup_script"] = sections.to_bash(skip_apt=True, skip_repo_setup=True)
+            record["setup_script"] = sections.to_bash(
+                skip_apt=True, skip_repo_setup=True
+            )
             record["eval_scripts"] = [eval_script]
             f.write(json.dumps(record) + "\n")
             written += 1
