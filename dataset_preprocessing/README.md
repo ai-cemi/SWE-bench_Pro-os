@@ -18,11 +18,12 @@ Step 3  prepare_dataset.py         attach setup scripts to HuggingFace dataset �
 
 ### Step 1 — generate bash setup scripts
 
-`gen_bash_script_setup.py` reads each task's Dockerfiles and emits a self-contained bash script that installs system deps, clones the repo, and creates a Python venv at `/opt/venv`.
+`gen_bash_script_setup.py` reads each task's Dockerfiles and emits a self-contained bash script that installs system deps, clones the repo, and creates a Python venv.
 
 ```bash
 # Generate scripts for all Python instances into scripts/
-python dataset_preprocessing/gen_bash_script_setup.py --all-python --output-dir scripts/
+# --repo-root sets the path baked into the script (default: $(pwd), i.e. CWD at runtime)
+python dataset_preprocessing/gen_bash_script_setup.py --all-python --output-dir scripts/ --repo-root /app
 
 # Or generate a single instance (useful for debugging)
 python dataset_preprocessing/gen_bash_script_setup.py --instance-id <iid> --output setup.sh
@@ -34,7 +35,7 @@ Each generated script is structured as:
 ENV  →  APT  →  REPO  →  PREPROCESS  →  UV VENV  →  PYTHON SETUP
 ```
 
-The venv is placed at `/opt/venv` (outside `/app`) so a `git clean -fdx` in the PREPROCESS step cannot delete it.
+The venv is placed at `.venv` relative to the working directory at eval time. The repo root used inside the script is controlled by `--repo-root` at generation time, and can be overridden at runtime via the `$SWE_REPO_ROOT` environment variable.
 
 ### Step 2 — aggregate apt packages
 
@@ -52,7 +53,15 @@ Re-run this after regenerating scripts to keep `install_system_deps.sh` in sync.
 
 ```bash
 python dataset_preprocessing/prepare_dataset.py --output artifacts/python_dataset.jsonl
+
+# Control where the venv is created (default: .venv, relative to CWD at eval time)
+python dataset_preprocessing/prepare_dataset.py --output artifacts/python_dataset.jsonl --venv-path .venv
+
+# Set the repo root baked into setup scripts (default: $(pwd))
+python dataset_preprocessing/prepare_dataset.py --output artifacts/python_dataset.jsonl --repo-root /app
 ```
+
+The generated eval scripts write their output to `$SWE_EVAL_DIR` (default: `$(pwd)/agent-evaluation`). They exit with pytest's exit code so callers can distinguish pass from fail.
 
 The output `python_dataset.jsonl` is the artifact consumed by everything downstream.
 
@@ -75,9 +84,9 @@ The output `python_dataset.jsonl` is the artifact consumed by everything downstr
 4. **Builds a Docker image** on top of the base image. The build clones the repo, checks out `base_commit`, runs `before_repo_set_cmd.sh`, and runs `setup.sh` to install the Python environment. This is the "frozen" state of the repo before any patch is applied.
 5. **Runs the container**, which:
    - Activates the venv
-   - Runs the eval script → saves results to `/workspace/before/`
+   - Runs the eval script → saves results to `./evaluation-results/before/`
    - Applies `patch.diff` with `git apply`
-   - Runs the eval script again → saves results to `/workspace/after/`
+   - Runs the eval script again → saves results to `./evaluation-results/after/`
    - Drops into an interactive bash shell (venv still active)
 
 A correctly set up instance should show failures in `before` and passes in `after`.
@@ -104,10 +113,10 @@ python dataset_preprocessing/test_instance.py 5 --no-keep-image
 Inside the interactive shell:
 
 ```bash
-cat /workspace/before/output.json   # test results before patch (failures expected)
-cat /workspace/after/output.json    # test results after patch  (passes expected)
-cat /workspace/before/eval.log      # full eval output before patch
-cat /workspace/after/eval.log       # full eval output after patch
+cat ./evaluation-results/before/output.json   # test results before patch (failures expected)
+cat ./evaluation-results/after/output.json    # test results after patch  (passes expected)
+cat ./evaluation-results/before/eval.log      # full eval output before patch
+cat ./evaluation-results/after/eval.log       # full eval output after patch
 ```
 
 ---
@@ -132,6 +141,9 @@ python dataset_preprocessing/gen_bash_script_setup.py --instance-id <iid>
 # Skip apt and repo setup (caller already has system deps + cloned repo)
 python dataset_preprocessing/gen_bash_script_setup.py --instance-id <iid> --skip-apt --skip-repo-setup
 
+# Set the repo root baked into the script (default: $(pwd); also overridable at runtime via $SWE_REPO_ROOT)
+python dataset_preprocessing/gen_bash_script_setup.py --instance-id <iid> --repo-root /app
+
 # List all Python instance IDs
 python dataset_preprocessing/gen_bash_script_setup.py --list-python
 ```
@@ -148,8 +160,13 @@ from dataset_preprocessing.dockerfile_to_bash import build_sections, load_local_
 base, inst = load_local_dockerfiles(iid)
 sections = build_sections(iid, base, inst)
 
+# Optional: control venv location and repo root baked into the script
+sections = build_sections(iid, base, inst, venv_path=".venv", repo_root="/app")
+
 sections.to_bash()                                     # full script
 sections.to_bash(skip_apt=True, skip_repo_setup=True)  # env + venv + python only
 sections.apt_packages                                  # set of debian package names
 sections.python_version                                # e.g. "3.11"
 ```
+
+At runtime, the generated script respects `$SWE_REPO_ROOT` to override the baked-in repo root.

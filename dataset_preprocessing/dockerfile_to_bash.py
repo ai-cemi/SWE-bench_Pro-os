@@ -12,7 +12,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_DIR = REPO_ROOT / "dockerfiles" / "base_dockerfile"
 INST_DIR = REPO_ROOT / "dockerfiles" / "instance_dockerfile"
-VENV_PATH = "/opt/venv"
+VENV_PATH = ".venv"
+DEFAULT_REPO_ROOT = "$(pwd)"
 
 FROM_RE = re.compile(r"^FROM\s+(\S+)", re.M)
 PYIMG_RE = re.compile(r"(^|/)python:")
@@ -22,6 +23,7 @@ HEREDOC_RE_TPL = r"<<'?{tag}'?[^\n]*\n(.*?)\n\s*{tag}\s*$"
 TIMEMACHINE_RE = re.compile(r"pypi-timemachine\s+(\d{4}-\d{2}-\d{2})")
 TIMEOUT_RE = re.compile(r"\s+--default-timeout=\d+")
 EDITABLE_RE = re.compile(r"^uv pip install -e \.$", re.M)
+CD_APP_RE = re.compile(r"^cd /app$", re.M)
 
 _PIP_VERBS = "install|uninstall|freeze|list|show|cache|index|download|wheel"
 _PYTHON_PIP_RE = re.compile(r"^(\s*)python3?\s+-m\s+pip\s+(.*)$")
@@ -105,7 +107,7 @@ def to_uv_block(text: str) -> str:
     return "\n".join(to_uv(line) for line in text.split("\n"))
 
 
-def iter_run_steps(content: str) -> list[str]:
+def iter_run_steps(content: str, repo_root: str = "$(pwd)") -> list[str]:
     """Yield each Dockerfile RUN/WORKDIR translated to bash. Skips heredoc RUNs."""
     out: list[str] = []
     lines = content.split("\n")
@@ -120,7 +122,7 @@ def iter_run_steps(content: str) -> list[str]:
                 buf.append(line)
             out.append("\n".join(buf))
         elif line.startswith("WORKDIR "):
-            out.append(f"cd {line[len('WORKDIR ') :].strip()}")
+            out.append(f'cd "${{SWE_REPO_ROOT:-{repo_root}}}"')
         i += 1
     return out
 
@@ -196,6 +198,7 @@ def transform_build(body: str, *, no_date_pin: bool) -> str:
         "env -u UV_EXCLUDE_NEWER uv pip install -e .",
         body,
     )
+    body = CD_APP_RE.sub('cd "${SWE_REPO_ROOT:-$(pwd)}"', body)
     return body
 
 
@@ -209,6 +212,7 @@ class SetupSections:
     base_runs: list[str] = field(default_factory=list)
     preprocess_body: str = ""
     python_setup_body: str = ""
+    venv_path: str = VENV_PATH
 
     def uv_env_bash(self) -> str:
         if not self.python_version:
@@ -220,8 +224,8 @@ class SetupSections:
                 '    source "$HOME/.local/bin/env" bash',
                 "fi",
                 'export PATH="$HOME/.local/bin:$PATH"',
-                f"uv venv --python {self.python_version} {VENV_PATH}",
-                f"source {VENV_PATH}/bin/activate",
+                f"uv venv --python {self.python_version} {self.venv_path}",
+                f"source {self.venv_path}/bin/activate",
             ]
         )
 
@@ -260,8 +264,12 @@ def build_sections(
     inst: str,
     *,
     no_date_pin: bool = False,
+    venv_path: str = VENV_PATH,
+    repo_root: str = "$(pwd)",
 ) -> SetupSections:
-    apt_blocks, other_steps = split_apt_vs_other(iter_run_steps(base))
+    apt_blocks, other_steps = split_apt_vs_other(
+        iter_run_steps(base, repo_root=repo_root)
+    )
     # Bug 2: drop any uv-pip line from base_runs (uv not yet installed at this stage).
     translated = [to_uv_block(s) for s in other_steps]
     base_runs = [
@@ -284,7 +292,22 @@ def build_sections(
         python_setup_body=transform_build(
             extract_heredoc(inst, "EOFBUILD"), no_date_pin=no_date_pin
         ),
+        venv_path=venv_path,
     )
+
+
+def resolve_repo_root(repo_root: str | None) -> str:
+    """Return repo_root, defaulting to DEFAULT_REPO_ROOT with a warning if None."""
+    import sys
+
+    if repo_root is None:
+        print(
+            f"Warning: --repo-root not set; defaulting to {DEFAULT_REPO_ROOT!r} in the generated script. "
+            "Pass --repo-root /app if you want to stick to the default SWE-bench behavior.",
+            file=sys.stderr,
+        )
+        return DEFAULT_REPO_ROOT
+    return repo_root
 
 
 def iter_python_instance_ids():

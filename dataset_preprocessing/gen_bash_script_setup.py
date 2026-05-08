@@ -23,7 +23,9 @@ import sys
 from pathlib import Path
 
 from dataset_preprocessing.dockerfile_to_bash import (
+    DEFAULT_REPO_ROOT,
     build_sections,
+    resolve_repo_root,
     is_python_dockerfile,
     iter_python_instance_ids,
     load_local_dockerfiles,
@@ -37,7 +39,9 @@ def _generate_one(iid: str, args) -> str | None:
         return None
     if not is_python_dockerfile(base):
         return None
-    sections = build_sections(iid, base, inst, no_date_pin=args.no_date_pin)
+    sections = build_sections(
+        iid, base, inst, no_date_pin=args.no_date_pin, repo_root=args.repo_root
+    )
     return sections.to_bash(
         skip_apt=args.skip_apt, skip_repo_setup=args.skip_repo_setup
     )
@@ -114,9 +118,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Strip pypi-timemachine without adding UV_EXCLUDE_NEWER.",
     )
+    p.add_argument(
+        "--repo-root",
+        default=None,
+        help=f"Repo root path baked into the setup script (default: {DEFAULT_REPO_ROOT!r}). "
+        "At runtime the script also respects $SWE_REPO_ROOT if set.",
+    )
     args = p.parse_args()
     if args.all_python and not args.output_dir:
         p.error("--all-python requires --output-dir")
+    args.repo_root = resolve_repo_root(args.repo_root)
     return args
 
 
