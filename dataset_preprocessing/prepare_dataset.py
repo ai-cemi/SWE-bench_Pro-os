@@ -20,7 +20,10 @@ from pathlib import Path
 from datasets import load_dataset
 
 from dataset_preprocessing.dockerfile_to_bash import (
+    DEFAULT_REPO_ROOT,
+    VENV_PATH,
     build_sections,
+    resolve_repo_root,
     is_python_dockerfile,
     load_local_dockerfiles,
 )
@@ -39,18 +42,23 @@ def build_eval_script(iid: str, row: dict) -> str:
 
     return f"""\
 #!/bin/bash
-# set -e
+# set -e intentionally omitted: eval must survive test failures
 
-cat > /workspace/run_script.sh << 'EOFRUNSCRIPT'
+EVAL_DIR="${{SWE_EVAL_DIR:-$(pwd)/agent-evaluation}}"
+mkdir -p "$EVAL_DIR"
+
+cat > "$EVAL_DIR/run_script.sh" << 'EOFRUNSCRIPT'
 {run_script_content}
 EOFRUNSCRIPT
 
-cat > /workspace/parser.py << 'EOFPARSER'
+cat > "$EVAL_DIR/parser.py" << 'EOFPARSER'
 {parser_content}
 EOFPARSER
 
-bash /workspace/run_script.sh "{test_files_csv}" > /workspace/stdout.log 2> /workspace/stderr.log
-python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json
+bash "$EVAL_DIR/run_script.sh" "{test_files_csv}" > "$EVAL_DIR/stdout.log" 2> "$EVAL_DIR/stderr.log"
+PYTEST_EXIT=$?
+python "$EVAL_DIR/parser.py" "$EVAL_DIR/stdout.log" "$EVAL_DIR/stderr.log" "$EVAL_DIR/output.json"
+exit $PYTEST_EXIT 
 """
 
 
@@ -64,7 +72,19 @@ def main() -> int:
         action="store_true",
         help="Strip pypi-timemachine without adding UV_EXCLUDE_NEWER.",
     )
+    p.add_argument(
+        "--venv-path",
+        default=VENV_PATH,
+        help=f"Path to the venv created by the setup script (default: {VENV_PATH!r}, relative to CWD at eval time).",
+    )
+    p.add_argument(
+        "--repo-root",
+        default=None,
+        help=f"Repo root path baked into the setup script (default: {DEFAULT_REPO_ROOT!r}). "
+        "At runtime the script also respects $SWE_REPO_ROOT if set.",
+    )
     args = p.parse_args()
+    args.repo_root = resolve_repo_root(args.repo_root)
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -90,7 +110,14 @@ def main() -> int:
                 print(f"[skip] {iid}: run_scripts not found", file=sys.stderr)
                 skipped += 1
                 continue
-            sections = build_sections(iid, base, inst, no_date_pin=args.no_date_pin)
+            sections = build_sections(
+                iid,
+                base,
+                inst,
+                no_date_pin=args.no_date_pin,
+                venv_path=args.venv_path,
+                repo_root=args.repo_root,
+            )
             record = dict(row)
             record["setup_script"] = sections.to_bash(
                 skip_apt=True, skip_repo_setup=True

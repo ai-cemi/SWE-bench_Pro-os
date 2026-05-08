@@ -3,8 +3,8 @@
 Build a Docker test environment for a single SWE-bench Pro dataset instance.
 
 The container runs the eval script before and after applying the patch, then
-drops into an interactive shell. Results land in /workspace/before/ and
-/workspace/after/ (output.json, stdout.log, stderr.log, eval.log).
+drops into an interactive shell. Results land in ./evaluation-results/before/ and
+./evaluation-results/after/ (output.json, stdout.log, stderr.log, eval.log).
 
 Usage:
     python test_instance.py <instance_id|index> [options]
@@ -37,14 +37,10 @@ source /opt/venv/bin/activate 2>/dev/null || true
 
 run_eval() {
     local label="$1"
-    local outdir="/workspace/$label"
+    local outdir="$(pwd)/evaluation-results/$label"
     mkdir -p "$outdir"
-    (
-        sed "s|/workspace/|${outdir}/|g" /workspace/eval.sh > "$outdir/eval_run.sh"
-        chmod +x "$outdir/eval_run.sh"
-        bash "$outdir/eval_run.sh" > "$outdir/eval.log" 2>&1 || true
-    )
-    echo "Done. Results in /workspace/$label/"
+    SWE_EVAL_DIR="$outdir" bash /workspace/eval.sh > "$outdir/eval.log" 2>&1 || true
+    echo "Done. Results in $outdir/"
 }
 
 echo "========================================================"
@@ -69,8 +65,8 @@ echo ""
 echo "========================================================"
 echo " Summary"
 echo "========================================================"
-echo "  Before results : /workspace/before/"
-echo "  After results  : /workspace/after/"
+echo "  Before results : $(pwd)/evaluation-results/before/"
+echo "  After results  : $(pwd)/evaluation-results/after/"
 echo "  (output.json, stdout.log, stderr.log, eval.log in each)"
 echo ""
 echo " Dropping into shell. The venv is active."
