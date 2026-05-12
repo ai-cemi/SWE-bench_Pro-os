@@ -493,6 +493,29 @@ def rewrite_app_paths(text: str) -> str:
     return text
 
 
+# Instances that test the warning machinery itself (e.g.
+# `TestRegex::test_passed_warnings` uses `pytest.warns(...)` to assert that
+# specific DeprecationWarnings ARE raised). Overriding `filterwarnings=`
+# globally lets those warnings be filtered out by something upstream, so
+# `pytest.warns` doesn't see them and the test fails. Hand-curated list —
+# add an instance here only after confirming it both:
+#   (a) does NOT need the override to bypass `filterwarnings = error` at
+#       conftest-import time (i.e. its conftest already imports cleanly), and
+#   (b) DOES regress when the override is injected.
+#
+# Future improvement: auto-detect this case by reading the test files listed
+# in `selected_test_files_to_run` at base_commit and grepping for
+# `pytest.warns(`. We didn't go that route yet because:
+#   - it requires a local checkout of the upstream repo at base_commit
+#     (extra git work at generation time), and
+#   - we currently have exactly 2 known cases. Revisit if more
+#     pytest.warns-style regressions show up after milestone 3.
+FILTERWARNINGS_OVERRIDE_OPT_OUT: set[str] = {
+    "instance_qutebrowser__qutebrowser-996487c43e4fcc265b541f9eca1e7930e3c5cf05-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+    "instance_qutebrowser__qutebrowser-52708364b5f91e198defb022d1a5b4b3ebd9b563-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+}
+
+
 # Match a pytest invocation at the START of a command (the start of a line,
 # possibly after `dbus-run-session --` or env-var assignments like
 # `QT_QPA_PLATFORM=offscreen`). Anchored to line start to avoid matching
@@ -558,7 +581,10 @@ def render_eval(
     run_script = rewrite_app_paths(run_script)
     # Override pytest.ini's `filterwarnings = error` so unrelated third-party
     # DeprecationWarnings don't kill conftest import (qutebrowser/pypeg2).
-    run_script = inject_filterwarnings_override(run_script)
+    # Opt-out instances test the warning machinery itself (pytest.warns) and
+    # regress under the override.
+    if instance_id not in FILTERWARNINGS_OVERRIDE_OPT_OUT:
+        run_script = inject_filterwarnings_override(run_script)
     return _fill(
         EVAL_TMPL,
         instance_id=instance_id,

