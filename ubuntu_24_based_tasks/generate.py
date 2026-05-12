@@ -117,29 +117,34 @@ def extract_date_pin(build_body: str) -> str | None:
     return m.group(1) if m else None
 
 
-def setuptools_cap(date_pin: str | None) -> str | None:
+def setuptools_cap(date_pin: str | None) -> str:
     """
     Pick a setuptools version spec based on date_pin.
 
-    Two constraints fight here:
+    Three constraints fight here:
       - Old projects often break on modern setuptools (>=60, >=68, >=80) which
         progressively removed easy_install / setup.py-develop / etc.
       - uv's editable install (PEP 660 `build_editable`) was added in setuptools
         64. Anything older silently breaks `uv pip install -e .` even with
         `--no-build-isolation`, because uv calls build_editable directly.
+      - setuptools 69+ ships `_distutils/_modified.py` that does
+        `from jaraco.functools import splat`. When project requirements pin
+        `jaraco.functools<4` (qutebrowser does at multiple base_commits), any
+        `import distutils.*` in the venv (hunter, _distutils_hack precedence)
+        crashes with `ImportError: cannot import name 'splat'`. Capping
+        setuptools at <69 dodges this regardless of date_pin.
 
     Compromise: floor every cap at >=64 (so PEP 660 works) and use
-    --no-build-isolation to keep that pinned setuptools active during the build.
+    --no-build-isolation only for old date_pins (modern ones use build
+    isolation so the build env has a coherent setuptools+jaraco set).
     """
-    if not date_pin:
-        return None
-    if date_pin < "2022-06-01":
+    if date_pin and date_pin < "2022-06-01":
         # Old projects: setuptools 64-66 — first versions with PEP 660 / build_editable,
         # before setuptools started deprecating legacy fields (>=68 drops easy_install).
         return ">=64,<67"
-    if date_pin < "2024-01-01":
-        return ">=64,<68"
-    return None
+    # Modern (or no date_pin): cap below 69 to avoid the splat ImportError when
+    # project requirements drag in an old jaraco.functools.
+    return ">=64,<69"
 
 
 def needs_no_build_isolation(date_pin: str | None) -> bool:
@@ -423,9 +428,10 @@ def render_install(
     install_steps: list[str],
 ) -> str:
     cap = setuptools_cap(date_pin)
-    if cap is not None:
-        # For old projects, UV_EXCLUDE_NEWER would filter out the setuptools
-        # version we need (PEP 660 / build_editable needs >=64, released 2022-09).
+    if date_pin:
+        # UV_EXCLUDE_NEWER would filter out the setuptools versions we need
+        # (PEP 660 / build_editable wants >=64, released 2022-09; we want <69
+        # to dodge the jaraco.functools.splat ImportError).
         # --exclude-newer-package=setuptools=YYYY lifts the cutoff just for setuptools.
         setuptools_line = (
             f'uv pip install --exclude-newer-package=setuptools=2024-01-01 '
@@ -433,7 +439,7 @@ def render_install(
             f'"setuptools{cap}" wheel  # date_pin={date_pin}'
         )
     else:
-        setuptools_line = "uv pip install setuptools wheel"
+        setuptools_line = f'uv pip install "setuptools{cap}" wheel'
     if needs_no_build_isolation(date_pin):
         setuptools_line += "\n# build isolation disabled for editable installs (see uv pip install -e . below)"
 

