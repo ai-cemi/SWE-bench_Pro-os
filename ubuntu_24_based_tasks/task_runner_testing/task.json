@@ -1,0 +1,26 @@
+{
+  "run_id": "dummy_run",
+  "task_id": "dummy_task",
+  "task": {
+    "instance_id": "astropy__astropy-12907",
+    "repo": "astropy/astropy",
+    "base_commit": "d16bfe05a744909de4b27f5875fe0d4ed41ce607",
+    "problem_statement": "Modeling's `separability_matrix` does not compute separability correctly for nested CompoundModels Consider the following model:\n\n```python\nfrom astropy.modeling import models as m\nfrom astropy.modeling.separable import separability_matrix\n\ncm = m.Linear1D(10) & m.Linear1D(5)\n```\n\nIt's separability matrix as you might expect is a diagonal:\n\n```python\n>>> separability_matrix(cm)\narray([[ True, False],\n [False, True]])\n```\n\nIf I make the model more complex:\n```python\n>>> separability_matrix(m.Pix2Sky_TAN() & m.Linear1D(10) & m.Linear1D(5))\narray([[ True, True, False, False],\n [ True, True, False, False],\n [False, False, True, False],\n [False, False, False, True]])\n```\n\nThe output matrix is again, as expected, the outputs and inputs to the linear models are separable and independent of each other.\n\nIf however, I nest these compound models:\n```python\n>>> separability_matrix(m.Pix2Sky_TAN() & cm)\narray([[ True, True, False, False],\n [ True, True, False, False],\n [False, False, True, True],\n [False, False, True, True]])\n```\nSuddenly the inputs and outputs are no longer separable?\n\nThis feels like a bug to me, but I might be missing something?",
+    "setup_script": "#!/bin/bash \n uv venv --python 3.9 && uv pip install 'setuptools==68.0.0' 'cython==0.29.22' extension_helpers oldest_supported_numpy wheel && CFLAGS='-Wno-incompatible-pointer-types -std=gnu11' uv pip install --no-build-isolation -e .[test]",
+    "test_patch": "diff --git a/astropy/modeling/tests/test_separable.py b/astropy/modeling/tests/test_separable.py\nindex 8dfe5c8626..c318bb029c 100644\n--- a/astropy/modeling/tests/test_separable.py\n+++ b/astropy/modeling/tests/test_separable.py\n@@ -27,6 +27,15 @@ p2 = models.Polynomial2D(1, name='p2')\n p22 = models.Polynomial2D(2, name='p22')\n p1 = models.Polynomial1D(1, name='p1')\n \n+cm_4d_expected = (\n+    np.array([False, False, True, True]),\n+    np.array([\n+        [True, True, False, False],\n+        [True, True, False, False],\n+        [False, False, True, False],\n+        [False, False, False, True]\n+    ])\n+)\n \n compound_models = {\n     'cm1': (map3 & sh1 | rot & sh1 | sh1 & sh2 & sh1,\n@@ -52,7 +61,17 @@ compound_models = {\n     'cm7': (map2 | p2 & sh1,\n             (np.array([False, True]),\n              np.array([[True, False], [False, True]]))\n-            )\n+            ),\n+    'cm8': (rot & (sh1 & sh2), cm_4d_expected),\n+    'cm9': (rot & sh1 & sh2, cm_4d_expected),\n+    'cm10': ((rot & sh1) & sh2, cm_4d_expected),\n+    'cm11': (rot & sh1 & (scl1 & scl2),\n+            (np.array([False, False, True, True, True]),\n+            np.array([[True, True, False, False, False],\n+                [True, True, False, False, False],\n+                [False, False, True, False, False],\n+                [False, False, False, True, False],\n+                [False, False, False, False, True]]))),\n }\n \n \n",
+    "patch": "diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py\nindex a308e27297..45bea36085 100644\n--- a/astropy/modeling/separable.py\n+++ b/astropy/modeling/separable.py\n@@ -242,7 +242,7 @@ def _cstack(left, right):\n         cright = _coord_matrix(right, 'right', noutp)\n     else:\n         cright = np.zeros((noutp, right.shape[1]))\n-        cright[-right.shape[0]:, -right.shape[1]:] = 1\n+        cright[-right.shape[0]:, -right.shape[1]:] = right\n \n     return np.hstack([cleft, cright])\n \n",
+    "eval_scripts": [
+      "#!/bin/bash \n uv run pytest astropy/modeling/tests/test_separable.py::test_separable[compound_model6-result6] astropy/modeling/tests/test_separable.py::test_separable[compound_model9-result9]"
+    ]
+  },
+  "inference_endpoint": {
+    "base_url": "http://n057-03.gpulab.ilabt.imec.be:5004",
+    "auth_token": "405a2096-6130-4082-96b4-ad2449ca3b51",
+    "supported_apis": ["anthropic-messages", "openai-completions"],
+    "model_name": "Qwen/Qwen3.6-35B-A3B-FP8"
+  },
+  "harness": {
+    "type": "oracle",
+    "config": {}
+  }
+}
