@@ -144,7 +144,7 @@ def setuptools_cap(date_pin: str | None) -> str | None:
 
 def needs_no_build_isolation(date_pin: str | None) -> bool:
     """
-    Any date-pinned instance needs --no-build-isolation for editable installs.
+    Pre-2024 instances need --no-build-isolation for editable installs.
 
     Why: with UV_EXCLUDE_NEWER set, uv's build-isolation environment also
     respects the cutoff and pulls in OLD setuptools for the build (e.g.
@@ -152,8 +152,16 @@ def needs_no_build_isolation(date_pin: str | None) -> bool:
     or break the project's setup.py. By disabling build isolation, the
     editable install uses the venv's already-installed setuptools (which we
     pinned to >=64 with --exclude-newer-package=setuptools=2024-01-01).
+
+    For modern date_pins (>=2024-01-01) we KEEP build isolation: the venv
+    holds whatever the project pinned in its requirements (e.g. old
+    jaraco.functools), and forcing a modern venv setuptools to drive
+    PEP 660 against those old pins breaks (e.g. setuptools 80 imports
+    `jaraco.functools.splat` which doesn't exist in jaraco.functools<4).
+    With build isolation re-enabled, uv builds against a coherent
+    setuptools+jaraco set inside the isolated env.
     """
-    return date_pin is not None
+    return date_pin is not None and date_pin < "2024-01-01"
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +182,9 @@ DROP_LINE_RES = [
     re.compile(r"^export QTWEB"),
     re.compile(r"^set -e\s*$"),  # install.sh sets its own pipeline behavior
     re.compile(r"^cd /app\s*$"),  # we already chdir'd via CWD contract
-    re.compile(r'^pip install setuptools\b'),  # we manage setuptools ourselves (see cap)
+    re.compile(r'^pip3? install setuptools\b'),  # we manage setuptools ourselves (see cap)
     re.compile(r'^python3? -m pip install --upgrade pip\b'),  # same as above
-    re.compile(r"^pip install --upgrade pip"),  # uv has no pip-upgrade concept
+    re.compile(r'^pip3? install --upgrade pip'),  # uv has no pip-upgrade concept
     re.compile(r'^apt-get\b'),  # all apt is in the base image
     re.compile(r'^apt\s+'),
     re.compile(r'^#'),
@@ -239,11 +247,14 @@ def translate_build_body(build_body: str, *, no_build_isolation: bool) -> list[s
         if re.search(r"\bscripts/link_pyqt\.py\b", line):
             out.append('echo "skipped: scripts/link_pyqt.py (irrelevant in uv-managed venv)"')
             continue
-        # Translate `pip install ...` and `python[3] -m pip install ...` -> `uv pip install ...`.
-        # The latter form is used by ansible's ubuntu:20.04 instances.
-        if re.match(r"^\s*(python3?\s+-m\s+)?pip\s+install\b", line):
+        # Translate `pip install ...`, `pip3 install ...`, and
+        # `python[3] -m pip install ...` -> `uv pip install ...`. The runner
+        # image has no system pip/pip3 (uv-managed venv only); these all need
+        # to route through uv. The `pip3` form is used by qutebrowser's
+        # ubuntu:18.04-derived Dockerfiles.
+        if re.match(r"^\s*(python3?\s+-m\s+)?pip3?\s+install\b", line):
             line = re.sub(
-                r"^\s*(python3?\s+-m\s+)?pip\s+install\b",
+                r"^\s*(python3?\s+-m\s+)?pip3?\s+install\b",
                 "uv pip install",
                 line,
             )
@@ -478,6 +489,56 @@ def rewrite_app_paths(text: str) -> str:
     return text
 
 
+# Match a pytest invocation at the START of a command (the start of a line,
+# possibly after `dbus-run-session --` or env-var assignments like
+# `QT_QPA_PLATFORM=offscreen`). Anchored to line start to avoid matching
+# `pytest` inside echo strings or comments.
+PYTEST_COMMAND_RE = re.compile(
+    r"""
+    ^                                       # start of line
+    (?P<indent>\s*)                         # leading whitespace
+    (?P<prefix>                             # optional env-var assignments / dbus-run-session
+        (?:[A-Z][A-Z0-9_]*=\S+\s+)*         # env-var assignments: FOO=bar BAZ=qux
+        (?:dbus-run-session\s+--\s+)?       # dbus-run-session wrapper
+        (?:[A-Z][A-Z0-9_]*=\S+\s+)*         # more env-vars (can also come AFTER dbus-run-session)
+    )
+    (?P<cmd>
+        (?:python[0-9.]*(?:\s+-[A-Za-z]+)?\s+-m\s+)?  # optional `python[-flags] -m`
+        pytest
+    )
+    (?=\s|$)                                # end of pytest token: space or EOL
+    """,
+    re.VERBOSE,
+)
+
+
+def inject_filterwarnings_override(run_script: str) -> str:
+    """Inject `--override-ini=filterwarnings=` into every pytest invocation.
+
+    Why: qutebrowser's `pytest.ini` sets `filterwarnings = error`, which turns
+    third-party `DeprecationWarning`s (notably `pypeg2==2.15.2`'s `\\s` regex,
+    triggered by Python 3.9.20+'s stricter `ast.parse`) into fatal
+    conftest-import failures (`pytest exits 4`). Suppressing the ini filter
+    lets test collection proceed; the parser still sees per-test PASS/FAIL
+    lines and the scorer decides resolved/unresolved from those.
+
+    Only matches pytest invocations at the START of a command line (so
+    `echo "pytest would be preferred"` is left alone). Idempotent: no-op if
+    `filterwarnings=` is already present on the line.
+    """
+    out_lines = []
+    for line in run_script.splitlines():
+        if "filterwarnings=" in line:
+            out_lines.append(line)
+            continue
+        new_line = PYTEST_COMMAND_RE.sub(
+            r'\g<indent>\g<prefix>\g<cmd> --override-ini="filterwarnings="',
+            line,
+        )
+        out_lines.append(new_line)
+    return "\n".join(out_lines)
+
+
 def render_eval(
     *,
     instance_id: str,
@@ -491,6 +552,9 @@ def render_eval(
     # Rewrite /app and self-ref env vars in the inlined run_script too
     # (ansible run_scripts reference /app/bin/ansible-test and PYTHONPATH=/app).
     run_script = rewrite_app_paths(run_script)
+    # Override pytest.ini's `filterwarnings = error` so unrelated third-party
+    # DeprecationWarnings don't kill conftest import (qutebrowser/pypeg2).
+    run_script = inject_filterwarnings_override(run_script)
     return _fill(
         EVAL_TMPL,
         instance_id=instance_id,
