@@ -263,12 +263,29 @@ def translate_build_body(build_body: str, *, no_build_isolation: bool) -> list[s
                 "uv pip install",
                 line,
             )
+            # Strip pip-only flags that `uv pip install` rejects. `--default-timeout`
+            # is used by openlibrary's `pip install --default-timeout=100 ...`;
+            # uv's equivalent is the UV_HTTP_TIMEOUT env var (already set in step 2).
+            line = re.sub(r"\s+--default-timeout(?:=\S+|\s+\S+)", "", line)
             # Inject --no-build-isolation for `uv pip install -e .` on old projects.
             if no_build_isolation and re.search(r"\buv pip install\b.*\s-e\s+\.(\s|$)", line) \
                and "--no-build-isolation" not in line:
                 line = line.replace(
                     "uv pip install", "uv pip install --no-build-isolation", 1,
                 )
+        # Tolerate failures of openlibrary's JS-side build steps. The Python
+        # eval doesn't need webpack/storybook output, but some pinned base_commits
+        # carry `iltorb` (a deprecated devDep) which doesn't compile against
+        # Node 22 in the runner image. Adding `|| true` keeps install.sh moving
+        # so the Python venv gets built. The `make js/css/components/i18n`
+        # targets call into `npm run build-assets:*`; same tolerance applies.
+        if re.match(r"^\s*npm\s+(ci|install)\b", line) and not line.rstrip().endswith("|| true"):
+            line = line.rstrip() + " || true"
+        elif re.match(r"^\s*make(\s|$)", line) and not line.rstrip().endswith("|| true"):
+            # All openlibrary `make` targets compile JS/CSS/i18n assets the
+            # Python eval doesn't need. Tolerate failures (iltorb/Node 22
+            # incompat, missing npx binaries, etc.).
+            line = line.rstrip() + " || true"
         # Rewrite /app paths and unsafe env-self-references.
         for rx, repl in APP_PATH_REWRITES:
             line = rx.sub(repl, line)
@@ -292,6 +309,24 @@ cd "$(pwd)"
 
 # --- 1. Reset repo to base_commit and apply before_repo_set_cmd ---------------
 @@BEFORE_REPO_SET_CMD@@
+
+# Initialize git submodules. The original SWE-bench base Dockerfile did this
+# after cloning, but our runner clones fresh per task without recursing, so
+# the project's vendored submodules (e.g. openlibrary's vendor/infogami) are
+# missing — breaking `import infogami` at pytest conftest time.
+#
+# Force-rewrite git:// -> https:// for github.com: old base_commits pin
+# .gitmodules to `git://github.com/...` URLs, but GitHub disabled the git
+# protocol on port 9418 in 2022, so submodule clone hangs indefinitely.
+# Use per-invocation `-c` so the rewrite is guaranteed to apply regardless of
+# $HOME / .gitconfig state in the runner. --depth=1 keeps the clone small
+# (vendored code is only imported at runtime; we don't need history).
+# Belt-and-suspenders: rewrite .gitmodules too so any nested `git submodule
+# foreach` or self-recursive call inherits the right URL.
+[ -f .gitmodules ] && sed -i 's|git://github.com/|https://github.com/|g' .gitmodules || true
+git submodule sync --recursive 2>/dev/null || true
+git -c url."https://github.com/".insteadOf="git://github.com/" \
+    submodule update --init --recursive --depth=1 || true
 
 # --- 2. Static env vars from base + instance Dockerfile ENV directives -------
 @@ENV_EXPORTS@@
@@ -444,6 +479,12 @@ def render_install(
         setuptools_line += "\n# build isolation disabled for editable installs (see uv pip install -e . below)"
 
     env_exports = []
+    # TZ=UTC works around a broken `/etc/localtime` symlink in some runner
+    # images (resolves to `/usr/share/zoneinfo//UTC` -> babel.localtime parses
+    # the trailing `/UTC` as absolute and crashes). Setting TZ makes
+    # babel/zoneinfo bypass the symlink path resolution. Harmless if the
+    # symlink is healthy. Hit during `make i18n` in openlibrary instances.
+    env_exports.append("export TZ=UTC")
     if date_pin:
         env_exports.append(f'export UV_EXCLUDE_NEWER={date_pin}')
     for k, v in env_vars.items():

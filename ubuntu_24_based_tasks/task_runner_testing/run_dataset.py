@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch task runner: publishes each entry from python_dataset_ubuntu24.jsonl to NATS and tracks results."""
+"""Batch task runner: publishes each entry from python_dataset-2.jsonl to NATS and tracks results."""
 
 import argparse
 import json
@@ -12,9 +12,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 TASK_JSON = SCRIPT_DIR / "task.json"
-# Use the standalone JSONL produced by ../generate.py — it has setup_script,
-# eval_scripts, env_vars, etc. baked in per record.
-DATASET = SCRIPT_DIR.parent / "python_dataset_ubuntu24.jsonl"
+DATASET = SCRIPT_DIR / "openlibrary.jsonl"
 RESULTS_FILE = SCRIPT_DIR / "results.jsonl"
 NATS_IMAGE = "natsio/nats-box:latest"
 
@@ -24,8 +22,8 @@ TASK_FIELDS = [
 ]
 
 
-def nats_url(host: str, port: int = 4222) -> str:
-    return f"nats://{host}:{port}"
+def nats_url(host: str) -> str:
+    return f"nats://{host}:4222"
 
 
 def docker_net_args(host: str) -> list[str]:
@@ -38,18 +36,21 @@ def nats_host() -> str:
     return "host.docker.internal" if platform.system() == "Darwin" else "localhost"
 
 
-def publish_and_wait(payload: dict, timeout: int, nats_port: int = 4222) -> dict | None:
+def publish_and_wait(payload: dict, timeout: int) -> dict | None:
     host = nats_host()
-    url = nats_url(host, nats_port)
+    url = nats_url(host)
     net = docker_net_args(host)
     run_id = payload["run_id"]
     task_subject = f"tasks.run.{run_id}"
     result_subject = f"results.run.{run_id}"
     payload_str = json.dumps(payload)
+    
+    nats_auth_args = ["--user", "natsuser", "--password", "natspassword"]
 
     sub_cmd = [
         "docker", "run", "--rm", *net, NATS_IMAGE,
         "nats", "sub",
+        *nats_auth_args,
         "--server", url,
         "--count", "1",
         "--timeout", f"{timeout}s",
@@ -61,9 +62,13 @@ def publish_and_wait(payload: dict, timeout: int, nats_port: int = 4222) -> dict
 
     time.sleep(1)
 
+    # Use stdin (`--force-stdin` + `-i`) instead of passing the payload as argv.
+    # Some payloads (e.g. ansible-92) exceed ARG_MAX on Linux and fail with
+    # OSError: [Errno 7] Argument list too long.
     pub_cmd = [
         "docker", "run", "--rm", "-i", *net, NATS_IMAGE,
         "nats", "publish",
+        *nats_auth_args,
         "--server", url,
         "--force-stdin",
         task_subject,
@@ -89,7 +94,14 @@ def main():
     parser.add_argument("--start-from", type=int, default=0, dest="start_from",
                         help="Skip the first N entries (0-based)")
     parser.add_argument("--limit", type=int, default=None, help="Only run N tasks")
+    parser.add_argument("--dataset", default=str(DATASET),
+                        help="Path to dataset JSONL (default: %(default)s)")
+    parser.add_argument("--results", default=str(RESULTS_FILE),
+                        help="Path to results JSONL (appended; default: %(default)s)")
     args = parser.parse_args()
+
+    dataset_path = Path(args.dataset)
+    results_path = Path(args.results)
 
     config = json.loads(TASK_JSON.read_text())
     run_id = config["run_id"]
@@ -97,7 +109,7 @@ def main():
     harness = config["harness"]
 
     entries = []
-    with DATASET.open() as f:
+    with dataset_path.open() as f:
         for line in f:
             line = line.strip()
             if line:
@@ -111,15 +123,15 @@ def main():
     print(f"Dataset: {total} entries total, running {len(subset)} "
           f"(start_from={args.start_from}, limit={args.limit})")
     print(f"Run ID: {run_id}")
-    print(f"harness: {harness}")
-    print(f"Results: {RESULTS_FILE}")
+    print(f"Dataset: {dataset_path}")
+    print(f"Results: {results_path}")
     print()
 
     resolved_ids = []
     unresolved_ids = []
     error_ids = []
 
-    results_fh = RESULTS_FILE.open("a")
+    results_fh = results_path.open("a")
 
     try:
         for i, entry in enumerate(subset, start=1):

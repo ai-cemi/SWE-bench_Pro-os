@@ -85,13 +85,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sshpass \
     rsync \
     make \
-    # openlibrary extras (postgres client, parallel, archive tools, node)
+    # openlibrary extras (postgres client + dev headers for psycopg2 source builds,
+    # parallel, archive tools, node, chromium for selenium-style tests)
     postgresql-client \
+    libpq-dev \
     parallel \
     zip \
     unzip \
     nodejs \
     npm \
+    chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv via the upstream container image — mirrors the itf-demo production
