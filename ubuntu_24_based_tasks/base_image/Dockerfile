@@ -80,6 +80,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     libyaml-dev \
     zlib1g-dev \
+    # ansible: integration tests need ssh tooling
+    openssh-client \
+    sshpass \
+    rsync \
+    make \
     # openlibrary extras (postgres client, parallel, archive tools, node)
     postgresql-client \
     parallel \

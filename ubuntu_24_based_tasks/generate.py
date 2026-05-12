@@ -25,7 +25,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATASET_PATH = REPO_ROOT / "artifacts" / "python_dataset.jsonl"
+# Source of truth: fresh dump from `ScaleAI/SWE-bench_Pro` HF dataset (Python subset).
+# `artifacts/python_dataset.jsonl` came from a dead-end pipeline that silently
+# filtered ~31 instances; do not use that file.
+DATASET_PATH = REPO_ROOT / "ubuntu_24_based_tasks" / "raw" / "raw_python_dataset.jsonl"
 BASE_DF_DIR = REPO_ROOT / "dockerfiles" / "base_dockerfile"
 INST_DF_DIR = REPO_ROOT / "dockerfiles" / "instance_dockerfile"
 RUN_SCRIPTS_DIR = REPO_ROOT / "run_scripts"
@@ -44,6 +47,9 @@ REPO_URLS = {
 # ---------------------------------------------------------------------------
 
 PY_VERSION_RE = re.compile(r"python:(\d+\.\d+)")
+# Fallback: ansible has a few ubuntu:20.04 base Dockerfiles that apt-install
+# `python3.9`, `python3.9-dev`, etc. Match the highest version installed.
+PY_APT_VERSION_RE = re.compile(r"\bpython3\.(\d+)\b")
 HEREDOC_RE = re.compile(
     r"RUN\s+cat\s+<<\s*'?(EOFBUILD|EOFPREP)'?\s*>\s*\S+\s*\n(.*?)\n\1",
     re.DOTALL,
@@ -53,11 +59,36 @@ TIMEMACHINE_DATE_RE = re.compile(r"pypi-timemachine\s+(\d{4}-\d{2}-\d{2})")
 
 
 def parse_python_version(base_dockerfile: str) -> str:
-    """Extract Python version from `FROM python:X.Y-slim` (with optional ECR mirror prefix)."""
+    """Extract Python version from the base Dockerfile.
+
+    Strategy:
+      1. Match `FROM python:X.Y-…` (with optional ECR mirror prefix). Covers
+         qutebrowser, openlibrary, and most ansible instances.
+      2. Fallback for `FROM ubuntu:20.04`-style bases that apt-install
+         `python3.X` packages — pick the highest X seen anywhere in the file.
+      3. Final fallback for `FROM ubuntu:22.04`-style bases that apt-install
+         only the unversioned `python3` package — match the python version
+         that the upstream ubuntu image actually ships:
+           ubuntu:20.04 -> 3.8
+           ubuntu:22.04 -> 3.10
+           ubuntu:24.04 -> 3.12
+    """
     m = PY_VERSION_RE.search(base_dockerfile)
-    if not m:
-        raise ValueError("could not find python:X.Y in base Dockerfile")
-    return m.group(1)
+    if m:
+        return m.group(1)
+    apt_versions = [int(x) for x in PY_APT_VERSION_RE.findall(base_dockerfile)]
+    if apt_versions:
+        return f"3.{max(apt_versions)}"
+    ubuntu_default = {
+        "20.04": "3.8",
+        "22.04": "3.10",
+        "24.04": "3.12",
+    }
+    for ver, py in ubuntu_default.items():
+        # Match `FROM …ubuntu:X.Y` (allows ECR / dockerhub mirror prefixes).
+        if re.search(rf"FROM\s+\S*ubuntu:{re.escape(ver)}\b", base_dockerfile):
+            return py
+    raise ValueError("could not find a Python version in base Dockerfile")
 
 
 def parse_env_vars(*dockerfiles: str) -> dict[str, str]:
@@ -112,8 +143,17 @@ def setuptools_cap(date_pin: str | None) -> str | None:
 
 
 def needs_no_build_isolation(date_pin: str | None) -> bool:
-    """Old projects need --no-build-isolation so our pinned setuptools is used."""
-    return date_pin is not None and date_pin < "2022-06-01"
+    """
+    Any date-pinned instance needs --no-build-isolation for editable installs.
+
+    Why: with UV_EXCLUDE_NEWER set, uv's build-isolation environment also
+    respects the cutoff and pulls in OLD setuptools for the build (e.g.
+    setuptools 62 at date_pin=2022-06-07), which can lack `build_editable`
+    or break the project's setup.py. By disabling build isolation, the
+    editable install uses the venv's already-installed setuptools (which we
+    pinned to >=64 with --exclude-newer-package=setuptools=2024-01-01).
+    """
+    return date_pin is not None
 
 
 # ---------------------------------------------------------------------------
@@ -135,11 +175,31 @@ DROP_LINE_RES = [
     re.compile(r"^set -e\s*$"),  # install.sh sets its own pipeline behavior
     re.compile(r"^cd /app\s*$"),  # we already chdir'd via CWD contract
     re.compile(r'^pip install setuptools\b'),  # we manage setuptools ourselves (see cap)
+    re.compile(r'^python3? -m pip install --upgrade pip\b'),  # same as above
     re.compile(r"^pip install --upgrade pip"),  # uv has no pip-upgrade concept
+    re.compile(r'^apt-get\b'),  # all apt is in the base image
+    re.compile(r'^apt\s+'),
     re.compile(r'^#'),
     re.compile(r'^python -c "import qutebrowser'),  # smoke checks at install time
     re.compile(r'^QT_QPA_PLATFORM=offscreen python -c'),
-    re.compile(r"^pip install pytest-rerunfailures"),  # we'll handle in install body if needed
+    # NOTE: keep `pip install pytest-rerunfailures` (will be translated to uv).
+    # PYTEST_ADDOPTS exports --reruns=3 in env_vars from the upstream ENV
+    # directive, so the plugin must actually be installed or pytest aborts.
+]
+
+
+# Rewrite `/app` (the upstream Dockerfile WORKDIR) to the runtime CWD.
+# Use single quotes to defer shell expansion of $(pwd) to install.sh runtime.
+APP_PATH_REWRITES = [
+    (re.compile(r'(?<![A-Za-z0-9_])/app/'), '"$(pwd)/"'),    # "/app/<X>" → "$(pwd)/<X>"
+    (re.compile(r'(?<![A-Za-z0-9_])/app(?![/A-Za-z0-9_-])'), '"$(pwd)"'),  # bare /app → "$(pwd)"
+]
+
+# Env-self-references like $PYTHONPATH break under `set -u` when the var is
+# unset on entry to install.sh. Rewrite to a defensive default.
+ENV_DEFENSIVE_REWRITES = [
+    (re.compile(r'\$PYTHONPATH\b'), '${PYTHONPATH:-}'),
+    (re.compile(r'\$LD_LIBRARY_PATH\b'), '${LD_LIBRARY_PATH:-}'),
 ]
 
 
@@ -160,6 +220,11 @@ def translate_build_body(build_body: str, *, no_build_isolation: bool) -> list[s
         a no-op that crashes loudly (FileNotFoundError on .tox-info.json) and
         was tolerated upstream via `|| true`. Replace with a comment echo so
         the intent is preserved without the noise.
+      - rewrite hard-coded `/app` paths (upstream Dockerfile WORKDIR) to the
+        runtime CWD via `"$(pwd)"`. Ansible's build heredoc sets `PYTHONPATH`,
+        `PATH`, and `mkdir -p /app/...` — all break in our CWD-based contract.
+      - rewrite self-referencing env-var expansions like `$PYTHONPATH` (which
+        is unset under `set -u`) to `${PYTHONPATH:-}`.
     """
     out: list[str] = []
     for raw in build_body.splitlines():
@@ -174,15 +239,25 @@ def translate_build_body(build_body: str, *, no_build_isolation: bool) -> list[s
         if re.search(r"\bscripts/link_pyqt\.py\b", line):
             out.append('echo "skipped: scripts/link_pyqt.py (irrelevant in uv-managed venv)"')
             continue
-        # Translate pip -> uv pip
-        if re.match(r"^\s*pip\s+install\b", line):
-            line = re.sub(r"^\s*pip\s+install\b", "uv pip install", line)
+        # Translate `pip install ...` and `python[3] -m pip install ...` -> `uv pip install ...`.
+        # The latter form is used by ansible's ubuntu:20.04 instances.
+        if re.match(r"^\s*(python3?\s+-m\s+)?pip\s+install\b", line):
+            line = re.sub(
+                r"^\s*(python3?\s+-m\s+)?pip\s+install\b",
+                "uv pip install",
+                line,
+            )
             # Inject --no-build-isolation for `uv pip install -e .` on old projects.
             if no_build_isolation and re.search(r"\buv pip install\b.*\s-e\s+\.(\s|$)", line) \
                and "--no-build-isolation" not in line:
                 line = line.replace(
                     "uv pip install", "uv pip install --no-build-isolation", 1,
                 )
+        # Rewrite /app paths and unsafe env-self-references.
+        for rx, repl in APP_PATH_REWRITES:
+            line = rx.sub(repl, line)
+        for rx, repl in ENV_DEFENSIVE_REWRITES:
+            line = rx.sub(repl, line)
         out.append(line)
     return out
 
@@ -261,12 +336,7 @@ EVAL_TMPL = r"""#!/usr/bin/env bash
 # shellcheck disable=SC1091
 source .swebench_env
 
-# Headless display (qutebrowser tests need a running X server + dbus).
-export DISPLAY=:99
-Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
-XVFB_PID=$!
-sleep 1
-
+@@XVFB_START@@
 # Write run_script.sh and parser.py (inlined verbatim from run_scripts/<iid>/).
 cat > .swebench_run_script.sh <<'RUN_SCRIPT_EOF'
 @@RUN_SCRIPT@@
@@ -286,8 +356,7 @@ echo "eval.sh: run_script.sh exit code = $TEST_RC"
 # Parse pytest output -> output.json.
 python .swebench_parser.py .swebench_stdout.log .swebench_stderr.log output.json
 
-# Stop Xvfb (best-effort).
-kill "$XVFB_PID" 2>/dev/null || true
+@@XVFB_STOP@@
 
 # --- Scoring: pass iff parsed output.json has no FAILED / ERROR entries -----
 # Decision based on parser output, NOT $TEST_RC (which is polluted by
@@ -376,6 +445,39 @@ def render_install(
     )
 
 
+XVFB_START_BLOCK = """\
+# Headless display (some repos' tests need a running X server + dbus, e.g. qutebrowser).
+export DISPLAY=:99
+Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
+XVFB_PID=$!
+sleep 1
+"""
+
+XVFB_STOP_BLOCK = """\
+# Stop Xvfb (best-effort).
+kill "$XVFB_PID" 2>/dev/null || true
+"""
+
+
+def needs_xvfb(run_script: str) -> bool:
+    """Decide whether eval.sh should launch Xvfb based on the run_script body.
+
+    Heuristic: the run_script references Xvfb (in case it expects one to be
+    pre-running), or sets QT_QPA_PLATFORM, or exports DISPLAY=. None of those
+    appear in ansible's or openlibrary's run_scripts; qutebrowser hits them all.
+    """
+    return bool(re.search(r"\b(Xvfb|QT_QPA_PLATFORM|DISPLAY=)", run_script))
+
+
+def rewrite_app_paths(text: str) -> str:
+    """Apply /app -> $(pwd) and $PYTHONPATH -> ${PYTHONPATH:-} rewrites."""
+    for rx, repl in APP_PATH_REWRITES:
+        text = rx.sub(repl, text)
+    for rx, repl in ENV_DEFENSIVE_REWRITES:
+        text = rx.sub(repl, text)
+    return text
+
+
 def render_eval(
     *,
     instance_id: str,
@@ -385,12 +487,18 @@ def render_eval(
 ) -> str:
     # Pass tests to run_script.sh as one comma-separated arg (the script handles both forms).
     tests_arg = ",".join(selected_tests)
+    xvfb = needs_xvfb(run_script)
+    # Rewrite /app and self-ref env vars in the inlined run_script too
+    # (ansible run_scripts reference /app/bin/ansible-test and PYTHONPATH=/app).
+    run_script = rewrite_app_paths(run_script)
     return _fill(
         EVAL_TMPL,
         instance_id=instance_id,
         run_script=run_script.rstrip("\n"),
         parser_py=parser_py.rstrip("\n"),
         selected_tests_arg=f'"{tests_arg}"',
+        xvfb_start=XVFB_START_BLOCK.rstrip("\n") if xvfb else "",
+        xvfb_stop=XVFB_STOP_BLOCK.rstrip("\n") if xvfb else "",
     )
 
 
@@ -528,9 +636,29 @@ def main() -> int:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Preserve existing JSONL records for OTHER instances so successive
+    # `--repo X` / `--repo Y` invocations accumulate rather than overwrite.
+    # Records for any instance_id we're regenerating now will be replaced.
+    new_ids = {r["instance_id"] for r in records}
+    preserved: list[dict] = []
+    if OUT_JSONL.exists():
+        with open(OUT_JSONL) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    prev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if prev.get("instance_id") not in new_ids:
+                    preserved.append(prev)
+
     ok = 0
     failed: list[tuple[str, str]] = []
     with open(OUT_JSONL, "w") as out_fh:
+        for prev in preserved:
+            out_fh.write(json.dumps(prev) + "\n")
         for r in records:
             try:
                 gen = generate_one(r)
@@ -539,7 +667,9 @@ def main() -> int:
             except Exception as e:
                 failed.append((r["instance_id"], f"{type(e).__name__}: {e}"))
 
-    print(f"generated {ok}/{len(records)} install.sh + eval.sh pairs", file=sys.stderr)
+    total_lines = len(preserved) + ok
+    print(f"generated {ok}/{len(records)} install.sh + eval.sh pairs "
+          f"(JSONL now has {total_lines} records)", file=sys.stderr)
     print(f"  per-instance dirs: {OUT_DIR}", file=sys.stderr)
     print(f"  extended JSONL:    {OUT_JSONL}", file=sys.stderr)
     if failed:

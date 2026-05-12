@@ -119,7 +119,14 @@ def run_in_container(
         # codes pass through), 90+ for our own steps.
         runner = dedent(f"""
             mkdir -p /tmp/jobs/x/workspace && cd /tmp/jobs/x/workspace
-            git clone --quiet {shlex.quote(repo_url)} . || exit 92
+            # Retry the clone: github.com occasionally drops connections.
+            for attempt in 1 2 3 4; do
+              if git clone --quiet {shlex.quote(repo_url)} . ; then break ; fi
+              echo "::: clone attempt $attempt failed; retrying in 5s :::" >&2
+              rm -rf ./* ./.[!.]* 2>/dev/null
+              sleep 5
+              if [ $attempt -eq 4 ]; then exit 92 ; fi
+            done
             git checkout --quiet {shlex.quote(base_commit)} || exit 93
 
             echo "::: running setup_script :::"
