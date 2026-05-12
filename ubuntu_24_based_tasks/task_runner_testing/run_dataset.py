@@ -24,8 +24,8 @@ TASK_FIELDS = [
 ]
 
 
-def nats_url(host: str) -> str:
-    return f"nats://{host}:4222"
+def nats_url(host: str, port: int = 4222) -> str:
+    return f"nats://{host}:{port}"
 
 
 def docker_net_args(host: str) -> list[str]:
@@ -38,9 +38,9 @@ def nats_host() -> str:
     return "host.docker.internal" if platform.system() == "Darwin" else "localhost"
 
 
-def publish_and_wait(payload: dict, timeout: int) -> dict | None:
+def publish_and_wait(payload: dict, timeout: int, nats_port: int = 4222) -> dict | None:
     host = nats_host()
-    url = nats_url(host)
+    url = nats_url(host, nats_port)
     net = docker_net_args(host)
     run_id = payload["run_id"]
     task_subject = f"tasks.run.{run_id}"
