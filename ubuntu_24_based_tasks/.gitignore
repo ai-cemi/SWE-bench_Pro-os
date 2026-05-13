@@ -23,6 +23,3 @@ task_runner_testing/__pycache__/
 
 # Latest-runner client (mirror of the runtime, not source of truth)
 task_runner_latest_main/
-
-# Stray Dockerfile experiment
-/Dockerfile
