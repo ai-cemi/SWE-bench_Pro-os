@@ -171,3 +171,6 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Local Claude Code state (settings, memory, plans). Not source-of-truth.
+.claude/
