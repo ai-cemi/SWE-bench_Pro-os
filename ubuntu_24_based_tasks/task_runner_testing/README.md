@@ -33,8 +33,8 @@ All paths relative to `task_runner_testing/`.
 | `results.jsonl` | 266 | Canonical merged result file, **in dataset order**. One row per `instance_id`, holding the full harness payload (`resolved`, `error`, `raw.evaluation`, timestamps). Companion to `../python_dataset_ubuntu24.jsonl`. |
 | `results.qute_ansible.jsonl` | 175 | Raw per-batch run output for the qutebrowser + ansible slice. |
 | `results.openlibrary.jsonl` | 91 | Raw per-batch run output for the openlibrary slice. |
-| `qute_ansible.jsonl` | 175 | Dataset subset fed to the runner for batch 1 (qute + ansible filter of `python_dataset_ubuntu24.jsonl`). |
-| `openlibrary.jsonl` | 91 | Dataset subset fed to the runner for batch 2 (openlibrary filter). |
+| `dataset.qute_ansible.jsonl` | 175 | Dataset subset fed to the runner for batch 1 (qute + ansible filter of `python_dataset_ubuntu24.jsonl`). |
+| `dataset.openlibrary.jsonl` | 91 | Dataset subset fed to the runner for batch 2 (openlibrary filter). |
 
 Schema of every result row (canonical):
 
@@ -114,8 +114,8 @@ regenerated on demand).
 ```bash
 python3 -c "
 import json
-qa = open('task_runner_testing/qute_ansible.jsonl', 'w')
-ol = open('task_runner_testing/openlibrary.jsonl', 'w')
+qa = open('task_runner_testing/dataset.qute_ansible.jsonl', 'w')
+ol = open('task_runner_testing/dataset.openlibrary.jsonl', 'w')
 for line in open('python_dataset_ubuntu24.jsonl'):
     iid = json.loads(line)['instance_id']
     if iid.startswith(('instance_ansible__','instance_qutebrowser__')):
@@ -130,12 +130,12 @@ for line in open('python_dataset_ubuntu24.jsonl'):
 ```bash
 cd task_runner_testing/
 # Batch 1: qutebrowser + ansible (~2h)
-python3 run_dataset.py --dataset qute_ansible.jsonl \
+python3 run_dataset.py --dataset dataset.qute_ansible.jsonl \
     --results results.qute_ansible.jsonl --timeout 1200
 
 # Batch 2: openlibrary (~1.5h; runs sequentially, can run in parallel
 # with batch 1 if the runner supports >1 consumer)
-python3 run_dataset.py --dataset openlibrary.jsonl \
+python3 run_dataset.py --dataset dataset.openlibrary.jsonl \
     --results results.openlibrary.jsonl --timeout 1200
 ```
 

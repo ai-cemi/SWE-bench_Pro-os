@@ -12,7 +12,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 TASK_JSON = SCRIPT_DIR / "task.json"
-DATASET = SCRIPT_DIR / "openlibrary.jsonl"
+DATASET = SCRIPT_DIR / "dataset.openlibrary.jsonl"
 RESULTS_FILE = SCRIPT_DIR / "results.jsonl"
 NATS_IMAGE = "natsio/nats-box:latest"
 
