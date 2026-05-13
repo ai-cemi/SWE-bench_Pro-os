@@ -6,8 +6,17 @@ out/
 python_dataset_ubuntu24.jsonl.bak_*
 
 # Transient task-runner artifacts (run outputs, dataset subsets, probes, logs).
-# Only the durable Python scripts under task_runner_testing/ are tracked.
+# Only the durable Python scripts under task_runner_testing/ are tracked, plus:
+#   - the canonical results.jsonl (companion to python_dataset_ubuntu24.jsonl)
+#   - the per-repo run artefacts produced during milestone runs:
+#     qute_ansible.jsonl, openlibrary.jsonl (dataset subsets passed to the runner)
+#     results.qute_ansible.jsonl, results.openlibrary.jsonl (per-batch results)
 task_runner_testing/*.jsonl
+!task_runner_testing/results.jsonl
+!task_runner_testing/qute_ansible.jsonl
+!task_runner_testing/openlibrary.jsonl
+!task_runner_testing/results.qute_ansible.jsonl
+!task_runner_testing/results.openlibrary.jsonl
 task_runner_testing/*.log
 task_runner_testing/*.txt
 task_runner_testing/__pycache__/
