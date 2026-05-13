@@ -105,12 +105,33 @@ The `<69` ceiling is always applied — even for modern date_pins — because th
 
 The end-to-end workflow is three sequential steps: **generate** the per-instance scripts + dataset, **run** them through the NATS oracle harness, **merge + annotate** the results back onto the dataset.
 
+### Two scenarios
+
+- **A. Full rebuild from scratch** — first time, or after a generator change. Run all three steps below over the full dataset.
+- **B. Adding new tasks to the existing dataset** (most common ongoing case) — only the new rows need to flow through. Recipe:
+  1. Append the new HF records to `raw/raw_python_dataset.jsonl`.
+  2. Run `python3 generate.py --repo <repo>` (the JSONL writer preserves rows for other repos, so this only touches the new ones plus any other rows that share the targeted repo).
+  3. Filter only the new instance_ids into a tiny dataset subset and run through `run_dataset.py`.
+  4. Use `merge_retry.py` to fold the new results into the existing `results.jsonl`, then re-run the annotation step (Step 3c) on the full dataset.
+  5. **Before doing anything, run the new tasks unmodified against the current generator.** If they all pass, you're done — no generator edit needed. Only descend into the playbook below if you hit failures.
+
 ### Prereqs
 
 - `itf-demo` task runner running on docker-compose. NATS on host port 4222 with auth `natsuser` / `natspassword`.
-- The runner image must include the apt set from `base_image/Dockerfile`. The actual deployed image lives at `itf-demo/crates/workload_agentic_coding_runner/Dockerfile`; **`base_image/Dockerfile` here is the single edit point for the apt deps our install scripts need**. When apt deps change: edit `base_image/Dockerfile` first (focused diff), then mirror the apt section into the itf-demo Dockerfile, then rebuild + restart the runner.
+- The runner image must include the apt set from `base_image/Dockerfile`. The actual deployed image lives at `itf-demo/crates/workload_agentic_coding_runner/Dockerfile`; **`base_image/Dockerfile` here is the single edit point for the apt deps our install scripts need**.
 - Local `docker` CLI (the client shells out to `natsio/nats-box:latest` for sub/pub).
 - Python 3.10+ on the host (stdlib only).
+
+#### When apt deps change (cross-repo manual loop)
+
+A change to `base_image/Dockerfile` is **not self-applying**. You must:
+
+1. Edit `base_image/Dockerfile` here (the focused diff).
+2. Mirror the new apt entries into `itf-demo/crates/workload_agentic_coding_runner/Dockerfile`.
+3. Have the operator rebuild + restart the runner (`docker compose build runner && docker compose up -d runner` inside itf-demo). This is a ~3–5 minute manual step the agent **cannot** do alone — pause and ask the user.
+4. Verify the new image is running before continuing.
+
+Forgetting this loop means your install.sh will run against the *old* image and hit "command not found" / missing-lib errors that look mysterious.
 
 ### Step 1 — Generate the dataset
 
@@ -301,14 +322,36 @@ Not in scope to fix at the toolchain level — would require pinning `uv venv --
 
 ## Lessons learned
 
-Carried over from milestones 1–3 (qutebrowser → ansible → openlibrary):
+Carried over from milestones 1–3 (qutebrowser → ansible → openlibrary). Full prose at [PLAYBOOK.md](./PLAYBOOK.md).
 
-1. **Probe-by-injection.** When the harness strips stdout/stderr, mutate the eval script in-flight to dump diagnostics (`head .swebench_stdout.log`, `cat .swebench_stderr.log`, `cat output.json`, etc.). Saves hours of guessing.
+### Diagnostic methodology
+
+1. **Probe-by-injection.** When the harness strips stdout/stderr, mutate the eval script in-flight to dump diagnostics (`head .swebench_stdout.log`, `cat .swebench_stderr.log`, `cat output.json`). Always probe *before* hypothesizing; one probe replaced 30 minutes of guessing about pytest exit 4.
 2. **Group failures by `v<setup_hash>` suffix.** Identical setup hashes mean identical generator output. "13 instances to debug" usually collapses to "2 setup scripts to read."
-3. **Reproduce in a clean container before editing the generator.** The runner container is opinionated (no system pip, broken `/etc/localtime`, Node 22, …). Reproduce in `docker exec` against the deployed runner first.
-4. **Always run a regression sample.** When changing the generator, include 5–10 previously-resolved instances alongside the newly-affected ones. Zero regressions before claiming a fix.
-5. **Commit verified work eagerly.** Smaller commits with "what + why + verification" tell the story; cheap to revert.
-6. **No system `python` / `pip` / `pip3`.** The generator must rewrite to `uv pip install` (and strip pip-only flags like `--default-timeout` along the way). Tolerating `make` / `npm` failures via `|| true` lets install.sh proceed to the Python deps the eval actually needs.
+3. **Reproduce in a clean container before editing the generator.** The runner container is opinionated (no system pip, broken `/etc/localtime`, Node 22, …). A repro shell script in `docker exec` catches the *actually* failing step, not the line that printed the final error — without that you fix the wrong thing.
+
+### Generator-edit discipline
+
+4. **Backup the dataset before regenerating** (e.g. `python_dataset_ubuntu24.jsonl.bak_<context>`). Cheap insurance against a generator change that goes sideways.
+5. **Run a regression sample alongside the target fix — across *all* repos in scope.** A qutebrowser-only sample misses ansible regressions. When changing the generator, include 5–10 previously-resolved instances from *every* affected repo. Zero regressions before claiming a fix.
+6. **Verify the transform's regex against real source files.** Generator regexes often match in unintended places (e.g. `pytest` inside an `echo` string). Anchor to line start when relevant, then grep the regenerated output for the unintended hits.
+7. **Trust the empirical diff: regenerated output vs committed.** Diff the new install.sh / eval.sh against the previous version to catch subtle wrong-line-touched regressions a unit test wouldn't catch.
+
+### Approach calibration
+
+8. **Default to the conservative scope of a fix, then widen.** Narrow conditions (e.g. `date_pin < 2024-01-01`) usually beat blanket changes when both seem viable; you can always relax later if the conservative version under-covers.
+9. **One bug at a time.** Split fixes by symptom. Each gets its own probe + verification + commit. Cheap to revert when one of three turns out wrong; impossible when they share a commit.
+10. **Call the advisor for non-trivial changes.** Rule of thumb: stakes ≥ 5 commits or ≥ 100 lines, or *any* generator-level change → invoke `advisor()` once before committing.
+
+### Process
+
+11. **Commit verified work eagerly.** Smaller commits with "what + why + verification" tell the story; cheap to revert. Don't batch fixes "to commit at the end."
+12. **Don't let `git add` go wild.** When the working tree mixes intentional changes with milestone-N-territory untracked files, `git add .` silently grabs everything. Stage explicitly by path.
+13. **Background long-running runs; never block on them.** Use `run_in_background=true`, monitor with `tail -f`, get notified on completion. The retry pipeline + completion notifications keep the foreground productive.
+
+### Cross-cutting
+
+14. **No system `python` / `pip` / `pip3`.** The generator must rewrite to `uv pip install` (and strip pip-only flags like `--default-timeout` along the way). Tolerating `make` / `npm` failures via `|| true` lets install.sh proceed to the Python deps the eval actually needs.
 
 ### Test ecosystem footguns that keep recurring
 
@@ -342,20 +385,43 @@ Use this verbatim to redo the work on a new SWE-bench-style dataset (not necessa
 >
 > # Playbook
 >
-> For each repo / dataset flavor:
+> ## Phase 0 — Try the happy path first
 >
-> 1. **Audit `base_image/Dockerfile`.** Diff the apt deps in the source instance Dockerfiles against the base. Add missing ones (dev headers for native builds, language runtimes, browser drivers). Tell the user to rebuild the runner image; wait for them.
-> 2. **Generate** install.sh + eval.sh via `python3 generate.py --repo <repo>` (or `--all-python`). Inspect a few outputs by hand; look for command-translator gaps (`pip3`, `--default-timeout`, `make` targets that abort install).
-> 3. **Probe 5 instances** first. Don't run the full set until probes pass; you'll waste hours otherwise. Include at least one instance "most likely to fail" (heaviest install step, most exotic build).
-> 4. **Classify failures by symptom** with `python3 stats.py`. Group by `v<setup_hash>` suffix — same hash means same generator output.
-> 5. **Use probe-by-injection** for any opaque failure. Mutate the eval script in-flight (search git history for `probe_run4.py` / `probe_ol_exit4.py` for the pattern) to dump stdout/stderr/conftest state.
-> 6. **Reproduce in `docker exec` against the runner** before changing the generator. The container's idiosyncrasies (uv-only python, Node 22, broken `/etc/localtime`, etc.) matter.
-> 7. **Run a regression sample alongside any generator change**: 5–10 previously-resolved instances + the 5–10 newly-affected ones. Zero regressions before claiming a fix.
-> 8. **Commit eagerly** after each verified fix. Small commits with "what + why + verification" tell the story.
-> 9. **Final pass**: run the full set, merge per-batch results into `results.jsonl`, annotate `oracle_check_ok` on the dataset, commit.
+> 1. **Run new tasks unmodified through the runner before doing anything else.** If they all pass, you're done: skip to the final pass step. Only descend into Phases 1–3 when you actually have failures to diagnose. This single check saves the most time across the playbook.
+>
+> ## Phase 1 — Environment + generation
+>
+> 2. **Audit `base_image/Dockerfile`.** Diff the apt deps in the source instance Dockerfiles against the base. Add missing ones (dev headers for native builds, language runtimes, browser drivers). When you change `base_image/Dockerfile`, **also mirror the change into `itf-demo/crates/workload_agentic_coding_runner/Dockerfile`** and ask the user to rebuild + restart the runner (~3–5 min manual step you cannot do yourself). Wait for confirmation before continuing.
+> 3. **Generate** install.sh + eval.sh via `python3 generate.py --repo <repo>` (or `--all-python`). Inspect a few outputs by hand; look for command-translator gaps (`pip3`, `--default-timeout`, `make` targets that abort install).
+> 4. **Backup the dataset** (`cp python_dataset_ubuntu24.jsonl python_dataset_ubuntu24.jsonl.bak_<context>`) before any non-trivial generator change.
+>
+> ## Phase 2 — Diagnose failures
+>
+> 5. **Probe 5 instances** first. Don't run the full set until probes pass; you'll waste hours otherwise. Include at least one "most likely to fail" instance (heaviest install step, most exotic build).
+> 6. **For single-instance iteration, use `validate.py` instead of the NATS runner.** It launches a one-shot container locally with live stdout/stderr — fastest feedback loop for "is my install.sh fix working?". `python3 validate.py --instance-id <iid>` runs both pre-patch (expect exit 1) and post-patch (expect exit 0).
+> 7. **Classify failures by symptom** with `python3 stats.py`. Group by `v<setup_hash>` suffix — same hash means same generator output, so 13 instances often collapse to 2 setup scripts.
+> 8. **Use probe-by-injection** for any opaque failure. Mutate the eval script in-flight (search git history for `probe_run4.py` / `probe_ol_exit4.py` for the pattern) to dump stdout/stderr/conftest state. Always probe *before* hypothesizing.
+> 9. **When the client times out with no useful error, read `docker logs <runner-container>`** to see what the runner-side process is doing. Clone hangs, npm hangs, and Python crashes all surface there, not in your client. Also `docker ps --filter ancestor=natsio/nats-box:latest | xargs -r docker stop` to clean orphan waiters that hold result subjects after a stopped run.
+> 10. **Reproduce in `docker exec` against the runner** before changing the generator. The container's idiosyncrasies (uv-only python, Node 22, broken `/etc/localtime`, etc.) matter. The repro catches the actually-failing step, not the line that printed the final error.
+>
+> ## Phase 3 — Fix discipline
+>
+> 11. **Default to the conservative scope of a fix, then widen.** Narrow conditions (e.g. `date_pin < 2024-01-01`) usually beat blanket changes when both seem viable.
+> 12. **One bug at a time.** Split fixes by symptom. Each gets its own probe + verification + commit. Splitting them makes each commit message clear and each revert cheap.
+> 13. **Verify the transform's regex against real source files**, and **trust the empirical diff** (regenerated install.sh / eval.sh vs the previous version) to catch unintended matches a unit test wouldn't.
+> 14. **Run a regression sample alongside any generator change — across *all* repos in scope**: 5–10 previously-resolved instances per repo + the 5–10 newly-affected ones. A single-repo sample misses cross-repo regressions. Zero regressions before claiming a fix.
+> 15. **Commit eagerly** after each verified fix. Small commits with "what + why + verification" tell the story. Don't batch fixes "to commit at the end."
+> 16. **Stage explicitly.** When the working tree mixes intentional changes with untracked artefacts from prior probes, `git add .` silently grabs them all. Add files by path.
+> 17. **Background long-running runs.** Use `run_in_background=true` and the completion notification. Don't block the foreground on a 2-hour batch.
+>
+> ## Phase 4 — Final pass
+>
+> 18. Run the full set, merge per-batch results into `results.jsonl` (in dataset order), annotate `oracle_check_ok` on the dataset (`true` iff `resolved` AND no error), commit.
+> 19. **What "commit" means concretely.** The deliverable artefacts under `task_runner_testing/` are: `results.jsonl`, `results.<batch>.jsonl` (one per batch), `dataset.<batch>.jsonl` (one per batch). All are whitelisted in `.gitignore`. Plus the annotated `python_dataset_ubuntu24.jsonl`. Don't forget the per-batch raw outputs — they're the audit trail.
 >
 > # Known footguns (carry these in your head from turn 1)
 >
+> Generator + install.sh:
 > - No system `pip` / `pip3` / `python`. Generator must rewrite to `uv pip install`.
 > - `pytest.ini` with `filterwarnings = error` is a trap. Inject `--override-ini="filterwarnings="` into pytest invocations.
 > - `uv venv` doesn't ship pip. Use `--seed` if the project shells out to `python -m pip` (ansible-test does).
@@ -366,13 +432,30 @@ Use this verbatim to redo the work on a new SWE-bench-style dataset (not necessa
 > - Native build deps (psycopg2, lxml, pymarc) fail under build isolation when uv's build-env setuptools doesn't match the project's pinned old jaraco. Re-enable build isolation only for modern `date_pin`s (≥2024-01-01); use `--no-build-isolation` for older ones.
 > - JS-side build steps (`npm install`, `make js/css/components`) on legacy commits pull in incompatible native addons (iltorb on Node 22). Tolerate via `|| true`; the Python eval doesn't need the JS artifacts.
 >
+> Operational (these waste hours if you don't know them):
+> - **Hung clones surface in the runner logs, not your client.** `docker logs itf-demo-runner-1 --tail 40` when a task takes > 60s without output.
+> - **Orphan `nats-box` waiters** hold result subjects across runs. After a `TaskStop`, `docker ps --filter ancestor=natsio/nats-box:latest | xargs -r docker stop`.
+> - **`make` re-invokes `npm` internally** even when you skip the explicit `npm install` step (openlibrary's Makefile delegates to `npm run build-assets:*`). To truly skip JS, you have to drop the `make` lines too — not just the `npm` line. Or just tolerate both with `|| true`.
+> - **The runner restart loop is manual.** A change to `base_image/Dockerfile` requires a mirror change in `itf-demo/.../Dockerfile` and a manual `docker compose build runner && docker compose up -d runner`. You can't do this yourself; ask the operator and wait.
+>
 > # What I want at the end
 >
-> - A regenerated `<lang>_dataset_<flavor>.jsonl` with `oracle_check_ok` annotated on every row.
-> - A `task_runner_testing/results.jsonl` that's a 1:1 companion (one row per dataset row, in the same order).
-> - Three or four small commits, each with a focused diff: base_image deps + tooling tweaks, generator changes with reproduction details, final annotation + per-batch artefacts, optional final cleanup.
+> Files committed (commit explicitly by path, not `git add .`):
+> - `ubuntu_24_based_tasks/python_dataset_ubuntu24.jsonl` — annotated with `oracle_check_ok` on every row.
+> - `ubuntu_24_based_tasks/task_runner_testing/results.jsonl` — 1:1 companion to the dataset, in dataset order.
+> - `ubuntu_24_based_tasks/task_runner_testing/results.<batch>.jsonl` — per-batch raw outputs (one per repo / batch you ran).
+> - `ubuntu_24_based_tasks/task_runner_testing/dataset.<batch>.jsonl` — per-batch dataset subsets you fed to the runner.
+> - Any generator / base_image / .gitignore edits you made along the way.
+>
+> Commits, in this shape (small and focused — three or four total):
+> 1. `base_image` deps + tooling tweaks (if any).
+> 2. Generator changes with reproduction details + probe evidence in the commit message.
+> 3. Final annotation + per-batch artefacts.
+> 4. (Optional) Final cleanup of transient files / README touch-ups.
+>
+> Plus, in the final response back to the user:
 > - Confirmation that the regression sample stayed green.
-> - An honest "still unresolved" list at the end. Don't paper over real test failures.
+> - An honest "still unresolved" list. Don't paper over real test failures.
 >
 > # Constraints
 >
