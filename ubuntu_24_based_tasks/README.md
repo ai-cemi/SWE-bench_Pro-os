@@ -101,13 +101,24 @@ The `<69` ceiling is always applied — even for modern date_pins — because th
 
 ---
 
-## Workflow A — Generate the dataset
+## Workflow
+
+The end-to-end workflow is three sequential steps: **generate** the per-instance scripts + dataset, **run** them through the NATS oracle harness, **merge + annotate** the results back onto the dataset.
+
+### Prereqs
+
+- `itf-demo` task runner running on docker-compose. NATS on host port 4222 with auth `natsuser` / `natspassword`.
+- The runner image must include the apt set from `base_image/Dockerfile`. The actual deployed image lives at `itf-demo/crates/workload_agentic_coding_runner/Dockerfile`; **`base_image/Dockerfile` here is the single edit point for the apt deps our install scripts need**. When apt deps change: edit `base_image/Dockerfile` first (focused diff), then mirror the apt section into the itf-demo Dockerfile, then rebuild + restart the runner.
+- Local `docker` CLI (the client shells out to `natsio/nats-box:latest` for sub/pub).
+- Python 3.10+ on the host (stdlib only).
+
+### Step 1 — Generate the dataset
 
 ```bash
-# 1. Build the base image (one-time, ~3 minutes)
+# 1a. Build the base image (one-time, ~3 minutes)
 docker build -t swebench-pro-ubuntu24 ubuntu_24_based_tasks/base_image/
 
-# 2. (One-time / on upstream change) Refresh raw HF dataset
+# 1b. (One-time / on upstream change) Refresh raw HF dataset
 python -c "
 from datasets import load_dataset
 import json
@@ -118,7 +129,7 @@ with open('ubuntu_24_based_tasks/raw/raw_python_dataset.jsonl','w') as f:
             f.write(json.dumps(r) + '\n')
 "
 
-# 3. Generate scripts for all repos (266 instances) or one at a time
+# 1c. Generate scripts for all repos (266 instances) or one at a time
 python ubuntu_24_based_tasks/generate.py --all-python
 # or:
 python ubuntu_24_based_tasks/generate.py --repo qutebrowser
@@ -130,22 +141,12 @@ python ubuntu_24_based_tasks/generate.py --repo openlibrary
 
 The `out/` directory is gitignored; everything you need to feed the runner lives in `python_dataset_ubuntu24.jsonl`.
 
----
+### Step 2 — Run through the NATS task runner
 
-## Workflow B — Oracle validation via the NATS task runner
-
-Used for milestone runs that produce the `oracle_check_ok` annotation. All commands run from `task_runner_testing/`.
-
-### Prereqs
-
-- `itf-demo` task runner running on docker-compose. NATS on host port 4222 with auth `natsuser` / `natspassword`.
-- The runner image must include the apt set from `base_image/Dockerfile`. The actual deployed image lives at `itf-demo/crates/workload_agentic_coding_runner/Dockerfile`; **`base_image/Dockerfile` here is the single edit point for the apt deps our install scripts need**. When apt deps change: edit `base_image/Dockerfile` first (focused diff), then mirror the apt section into the itf-demo Dockerfile, then rebuild + restart the runner.
-- Local `docker` CLI (the client shells out to `natsio/nats-box:latest` for sub/pub).
-- Python 3.10+ on the host (stdlib only).
-
-### Build the batch subsets
+All commands below run from `task_runner_testing/`.
 
 ```bash
+# 2a. Build the batch subsets
 python3 -c "
 import json
 qa = open('task_runner_testing/dataset.qute_ansible.jsonl', 'w')
@@ -157,11 +158,8 @@ for line in open('python_dataset_ubuntu24.jsonl'):
     elif iid.startswith('instance_internetarchive__'):
         ol.write(line)
 "
-```
 
-### Run
-
-```bash
+# 2b. Run
 cd task_runner_testing/
 
 # Batch 1: qutebrowser + ansible (~2h)
@@ -175,13 +173,13 @@ python3 run_dataset.py --dataset dataset.openlibrary.jsonl \
 
 Each row is appended as it completes; resume with `--start-from N`.
 
-### Merge + annotate
+### Step 3 — Merge + annotate
 
 ```bash
-# Backup the dataset first (it'll be rewritten in place)
+# 3a. Backup the dataset first (it'll be rewritten in place)
 cp ../python_dataset_ubuntu24.jsonl ../python_dataset_ubuntu24.jsonl.bak
 
-# Merge per-batch result files into one results.jsonl in dataset order
+# 3b. Merge per-batch result files into one results.jsonl in dataset order
 python3 -c "
 import json
 res = {}
@@ -194,7 +192,7 @@ with open('../python_dataset_ubuntu24.jsonl') as f, open('results.jsonl','w') as
         if iid in res: g.write(json.dumps(res[iid]) + '\n')
 "
 
-# Annotate oracle_check_ok on the dataset
+# 3c. Annotate oracle_check_ok on the dataset
 python3 -c "
 import json, os
 res = {json.loads(l)['instance_id']: json.loads(l) for l in open('results.jsonl')}
@@ -243,17 +241,17 @@ Every row in `results*.jsonl`:
 
 ### Helper scripts (under `task_runner_testing/`)
 
-- **`stats.py`** — classify a result file's unresolved rows by reason (`run_script_failed`, `setup_script_failed`, `tests_failed_scorer`, `network_git_fetch_failed`, …). Reads `results.jsonl` by default. Useful for quickly bucketing a fresh run.
+- **`run_dataset.py`** — the canonical runner. Sequential, foreground, publishes via NATS stdin (`--force-stdin` dodges Linux ARG_MAX), authenticates with `natsuser`/`natspassword`, writes one result row per task as soon as it arrives.
 - **`retry_run.py`** — re-run an arbitrary subset; same CLI as `run_dataset.py` with explicit `--dataset` / `--results`. Useful for retrying network-failed cases or testing a generator change against a small sample.
 - **`merge_retry.py`** — fold a retry result file into a larger one by `instance_id`. Replaces the row in-place; everything else is kept.
-- **`run_dataset.py`** — the canonical runner. Sequential, foreground, publishes via NATS stdin (`--force-stdin` dodges Linux ARG_MAX), authenticates with `natsuser`/`natspassword`, writes one result row per task as soon as it arrives.
+- **`stats.py`** — classify a result file's unresolved rows by reason (`run_script_failed`, `setup_script_failed`, `tests_failed_scorer`, `network_git_fetch_failed`, …). Reads `results.jsonl` by default. Useful for quickly bucketing a fresh run.
 - **`task.json`** — config skeleton: `run_id`, dummy `task` (the publisher overwrites this per instance), `inference_endpoint`, `harness`. The `run_id` must match what the deployed runner is consuming.
 
 ---
 
-## Workflow C — Standalone single-instance debugger (`validate.py`)
+## Standalone single-instance debugger (`validate.py`)
 
-`validate.py` is a parallel path used for debugging one instance in isolation, without the NATS runner. It launches a one-shot disposable docker container against the local `swebench-pro-ubuntu24` image, clones the repo, applies patches, runs `install.sh` + `eval.sh` in sequence, and live-streams the container's stdout+stderr to your terminal. Per instance it asserts:
+For iterating on `install.sh`/`eval.sh` for one instance with live output — without the NATS runner. `validate.py` launches a one-shot disposable docker container against the local `swebench-pro-ubuntu24` image, clones the repo, applies patches, runs `install.sh` + `eval.sh` in sequence, and live-streams the container's stdout+stderr to your terminal. Per instance it asserts:
 
 - **Pre-patch** (no harness): scorer exits **1** (the `fail_to_pass` tests fail, `pass_to_pass` tests pass).
 - **Post-patch** (gold harness applied): scorer exits **0** (all tests pass).
@@ -276,7 +274,7 @@ python ubuntu_24_based_tasks/validate.py --repo qutebrowser --diverse
 python ubuntu_24_based_tasks/validate.py --repo qutebrowser --sample 3 --skip-post-patch
 ```
 
-Note: `validate.py` predates the NATS-runner workflow and does NOT exercise the runner's clone/checkout step (it does its own). It's the right tool when you want to iterate on `install.sh`/`eval.sh` for a single instance with live output, but the milestone numbers in the [status table](#status) come from Workflow B against the deployed runner.
+Note: `validate.py` predates the NATS-runner workflow and does NOT exercise the runner's clone/checkout step (it does its own). It's the right tool for debugging a single instance; the milestone numbers in the [status table](#status) come from the NATS-runner workflow above.
 
 ---
 
