@@ -2,8 +2,17 @@
 # Source of truth: python_dataset_ubuntu24.jsonl. Don't track the renders.
 out/
 
+# Python bytecode caches anywhere under this tree
+__pycache__/
+
 # Local dataset backups
 python_dataset_ubuntu24.jsonl.bak_*
+
+# Stray result/log files at this folder's root (only the canonical
+# python_dataset_ubuntu24.jsonl belongs here). Per-batch results live
+# under task_runner_testing/ with their own negation rules below.
+/results*.jsonl
+/*.log
 
 # Transient task-runner artifacts (run outputs, dataset subsets, probes, logs).
 # Only the durable Python scripts under task_runner_testing/ are tracked, plus:
